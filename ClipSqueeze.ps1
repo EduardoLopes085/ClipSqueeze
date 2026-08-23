@@ -2,13 +2,18 @@
     ClipSqueeze
     Compressão de vídeo simplificada via FFmpeg (CPU ou GPU) para PowerShell.
 
+    Comando principal: Compress-Video (segue a convenção Verbo-Substantivo do
+    PowerShell, a mesma de Compress-Archive). O alias 'comprimir' funciona
+    exatamente igual.
+
     Uso:
+        Compress-Video <acelerador> <arquivo> [perfil] [limite]
         comprimir <acelerador> <arquivo> [perfil] [limite]
 
     Exemplos:
-        comprimir cpu "clipe_jogando"
-        comprimir gpu "clipe_jogando" quality
-        comprimir gpu "clipe_jogando" efficient 40mb
+        comprimir cpu "gravacao_reuniao"
+        comprimir gpu "gravacao_reuniao" quality
+        comprimir gpu "gravacao_reuniao" efficient 40mb
 
     Veja o README para detalhes de instalação, perfis disponíveis e como
     o cálculo de limite de tamanho funciona.
@@ -299,7 +304,7 @@ function Read-ProgressTail {
     }
 }
 
-function comprimir {
+function Compress-Video {
     param(
         [Parameter(Mandatory=$true, Position=0)]
         [string]$acelerador,
@@ -474,3 +479,5 @@ function comprimir {
 
     Remove-Item $stdoutLog, $stderrLog, $progressFile -ErrorAction SilentlyContinue
 }
+
+Set-Alias -Name comprimir -Value Compress-Video

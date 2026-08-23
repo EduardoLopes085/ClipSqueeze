@@ -1,5 +1,7 @@
 # 🎬 ClipSqueeze
 
+🇧🇷 Português | 🇺🇸 [English](README.en.md)
+
 **Compressão de vídeo inteligente, direto do seu terminal PowerShell — CPU ou GPU, perfis com intenção real, e do jeito que você realmente usa: sem precisar decorar flag nenhuma do FFmpeg.**
 
 <p align="center">
@@ -14,12 +16,12 @@
 
 ## 💡 Por que este projeto existe
 
-Comprimir um clipe rápido pra mandar no Discord ou no WhatsApp não devia exigir que você saiba a diferença entre CRF e QP, o que é um preset `veryslow`, ou por que seu vídeo de 200MB simplesmente não passa no limite de upload de ninguém.
+Comprimir um vídeo rápido pra mandar no Discord ou no WhatsApp não devia exigir que você saiba a diferença entre CRF e QP, o que é um preset `veryslow`, ou por que seu arquivo de 200MB simplesmente não passa no limite de upload de ninguém.
 
 **ClipSqueeze** gira em torno de uma única função PowerShell, `comprimir`, que vira uma camada de abstração em cima do FFmpeg: você diz **onde** processar (CPU ou GPU), **como** quer priorizar (velocidade, equilíbrio, eficiência ou qualidade) e, se quiser, **quanto** o arquivo final pode pesar. O script cuida do resto.
 
 ```powershell
-comprimir gpu "nome_do_video" efficient 40mb
+comprimir gpu "gravacao_reuniao" efficient 40mb
 ```
 
 Isso é tudo que você precisa saber pra usar.
@@ -92,12 +94,12 @@ O limite de tamanho é tratado como uma **restrição**, não como uma meta a se
 
 ## 📦 Instalação
 
-1. Baixe o `ClipSqueeze.ps1` deste repositório.
+1. Baixe o `ClipSqueeze.ps1` deste repositório e salve numa pasta de sua preferência.
 2. Abra seu perfil do PowerShell:
    ```powershell
    notepad $PROFILE
    ```
-3. Adicione a linha abaixo, apontando pro caminho onde salvou o arquivo:
+3. No final do arquivo, adicione a linha abaixo — troque `C:\caminho\para\ClipSqueeze.ps1` pelo caminho real de onde você salvou o arquivo no passo 1:
    ```powershell
    . "C:\caminho\para\ClipSqueeze.ps1"
    ```
@@ -113,6 +115,8 @@ Se o FFmpeg ainda não estiver instalado, não se preocupe — na primeira execu
 comprimir <acelerador> <arquivo> [perfil] [limite]
 ```
 
+> O comando "oficial" é `Compress-Video` (segue a convenção Verbo-Substantivo do PowerShell, a mesma de `Compress-Archive`) — o alias `comprimir` funciona exatamente igual e é o nome pensado pro uso do dia a dia.
+
 | Parâmetro | Obrigatório | Valores aceitos | Padrão |
 |---|---|---|---|
 | `acelerador` | ✅ | `cpu`, `gpu` | — |
@@ -124,19 +128,19 @@ comprimir <acelerador> <arquivo> [perfil] [limite]
 
 ```powershell
 # Compressão simples, perfil balanceado, sem restrição de tamanho
-comprimir cpu "nome_do_video"
+comprimir cpu "gravacao_reuniao"
 
 # GPU com perfil de melhor qualidade visual
-comprimir gpu "nome_do_video" quality
+comprimir gpu "gravacao_reuniao" quality
 
 # GPU priorizando eficiência, respeitando 40MB (ex: limite de upload do Discord)
-comprimir gpu "nome_do_video" efficient 40mb
+comprimir gpu "gravacao_reuniao" efficient 40mb
 
 # CPU rápido, pra um preview descartável
-comprimir cpu "nome_do_video" fast
+comprimir cpu "gravacao_reuniao" fast
 ```
 
-Repare que você não precisa digitar a extensão do arquivo — se `nome_do_video.mp4` existir na pasta atual, o script encontra sozinho.
+Repare que você não precisa digitar a extensão do arquivo — se `gravacao_reuniao.mp4` existir na pasta atual, o script encontra sozinho.
 
 ---
 
@@ -190,7 +194,7 @@ A margem de segurança existe porque o cálculo teórico de bitrate não é uma 
  Saída: 1920x-2
 =============================================================
 
-Arquivo: nome_do_clip.mp4
+Arquivo: gravacao_reuniao.mp4
 Acelerador: gpu
 Perfil: efficient
 Limite: 20mb
@@ -243,14 +247,14 @@ Alguns bugs que apareceram durante o desenvolvimento e valem registrar, porque n
 
 - [ ] Seletor de codec (H.264 / H.265 / AV1) independente do acelerador
 - [ ] Suporte a NVIDIA (NVENC) e Intel (QuickSync)
-- [ ] EOpção de resolução alvo
-- [ ] Opção de reescrita/limpeza de metadados do vídeo final
-- [ ] Instalação automática do FFmpeg também via Chocolatey/Scoop, além do winget
-- [ ] Notificação nativa do Windows ao concluir
-- [ ] Transformar em módulo PowerShell .psd1 + publicar na PowerShell Gallery
-- [ ] Flag -Force / modo não-interativo
-- [ ] Compressão por techo escolhido
-- [ ] Suporte a wildcard processando em fila sequencial
+- [ ] Resolução de saída configurável (hoje fixa em `1920:-2`)
+- [ ] Reescrita/limpeza de metadados do vídeo final
+- [ ] Instalação do FFmpeg também via Chocolatey/Scoop, além do winget
+- [ ] Notificação nativa do Windows ao concluir a compressão
+- [ ] Publicar como módulo PowerShell (`.psd1`) na PowerShell Gallery
+- [ ] Flag `-Force` para uso não-interativo, ideal pra automação
+- [ ] Compressão de um trecho específico do vídeo (corte por tempo inicial/final)
+- [ ] Suporte a lote — processar vários arquivos via wildcard em fila sequencial
 
 ---
 
