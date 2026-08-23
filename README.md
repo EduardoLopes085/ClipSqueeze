@@ -48,12 +48,12 @@ Isso é tudo que você precisa saber pra usar.
 ## ✨ Recursos
 
 - 🔍 **Detecção automática de arquivo** — cole o nome do vídeo sem extensão, o script encontra o arquivo certo sozinho.
-- 📊 **Painel de progresso real** — barra que preenche de verdade, tempo decorrido, tempo restante estimado e velocidade de codificação, tudo ao vivo.
+- 📊 **Painel de progresso real** — barra que preenche, tempo decorrido, tempo restante estimado e velocidade de codificação, tudo ao vivo.
 - ⚡ **CPU ou GPU** — codifique via `libx265` (software) ou aceleração por hardware AMD (`hevc_amf`), sem precisar saber qual encoder usar.
 - 🎚️ **Perfis com intenção, não presets crus** — `fast`, `balanced`, `efficient` e `quality` significam a mesma coisa independente do acelerador escolhido.
 - 📦 **Restrição de tamanho opcional** — diga `40mb` e o script calcula o bitrate necessário a partir da duração real do vídeo, com margem de segurança. Uma única codificação, sem tentativa e erro.
 - 🛠️ **Auto-diagnóstico do FFmpeg** — verifica se `ffmpeg`/`ffprobe` estão instalados e oferece instalar via `winget` na hora, se faltar algo.
-- 🧯 **Erros tratados de verdade** — sem falsos positivos, com log salvo automaticamente quando algo dá errado.
+- 🧯 **Erros tratados** — log salvo automaticamente quando algo dá errado.
 
 ---
 
@@ -75,7 +75,7 @@ flowchart LR
     I --> J["Arquivo comprimido"]
 ```
 
-Quando você define um limite de tamanho (ex: `40mb`), o script **não** faz busca binária nem tenta várias vezes até acertar o tamanho — isso seria lento, caro e desnecessariamente complexo. Em vez disso, ele calcula matematicamente o bitrate que deveria produzir um arquivo dentro do orçamento, aplica uma margem de segurança fixa (pra compensar overhead de container) e codifica **uma única vez**.
+Quando você define um limite de tamanho (ex: `40mb`), o script calcula matematicamente o bitrate que deve produzir um arquivo dentro do orçamento, aplica uma margem de segurança fixa (pra compensar overhead de container) e codifica **uma única vez**.
 
 O limite de tamanho é tratado como uma **restrição**, não como uma meta a ser preenchida. Se o resultado ficar 10% abaixo do limite, ótimo — o script não vai tentar "aproveitar" o espaço que sobrou.
 
@@ -103,8 +103,6 @@ O limite de tamanho é tratado como uma **restrição**, não como uma meta a se
    ```
 4. Salve, feche o editor e reabra o terminal (ou rode `. $PROFILE` pra recarregar sem fechar).
 
-> 💡 O projeto se chama **ClipSqueeze**, mas o comando que você digita no terminal continua sendo `comprimir` — é o nome que já faz parte do seu fluxo de trabalho.
-
 Se o FFmpeg ainda não estiver instalado, não se preocupe — na primeira execução o script detecta isso e pergunta se pode instalar via `winget` pra você.
 
 ---
@@ -126,19 +124,19 @@ comprimir <acelerador> <arquivo> [perfil] [limite]
 
 ```powershell
 # Compressão simples, perfil balanceado, sem restrição de tamanho
-comprimir cpu "clipe_jogando"
+comprimir cpu "nome_do_video"
 
 # GPU com perfil de melhor qualidade visual
-comprimir gpu "clipe_jogando" quality
+comprimir gpu "nome_do_video" quality
 
 # GPU priorizando eficiência, respeitando 40MB (ex: limite de upload do Discord)
-comprimir gpu "clipe_jogando" efficient 40mb
+comprimir gpu "nome_do_video" efficient 40mb
 
 # CPU rápido, pra um preview descartável
-comprimir cpu "clipe_jogando" fast
+comprimir cpu "nome_do_video" fast
 ```
 
-Repare que você não precisa digitar a extensão do arquivo — se `clipe_jogando.mp4` existir na pasta atual, o script encontra sozinho.
+Repare que você não precisa digitar a extensão do arquivo — se `nome_do_video.mp4` existir na pasta atual, o script encontra sozinho.
 
 ---
 
@@ -192,7 +190,7 @@ A margem de segurança existe porque o cálculo teórico de bitrate não é uma 
  Saída: 1920x-2
 =============================================================
 
-Arquivo: clipe_jogando.mp4
+Arquivo: nome_do_clip.mp4
 Acelerador: gpu
 Perfil: efficient
 Limite: 20mb
@@ -245,15 +243,20 @@ Alguns bugs que apareceram durante o desenvolvimento e valem registrar, porque n
 
 - [ ] Seletor de codec (H.264 / H.265 / AV1) independente do acelerador
 - [ ] Suporte a NVIDIA (NVENC) e Intel (QuickSync)
-- [ ] Evitar upscale automático quando o vídeo de origem for menor que a resolução alvo
+- [ ] EOpção de resolução alvo
 - [ ] Opção de reescrita/limpeza de metadados do vídeo final
 - [ ] Instalação automática do FFmpeg também via Chocolatey/Scoop, além do winget
+- [ ] Notificação nativa do Windows ao concluir
+- [ ] Transformar em módulo PowerShell .psd1 + publicar na PowerShell Gallery
+- [ ] Flag -Force / modo não-interativo
+- [ ] Compressão por techo escolhido
+- [ ] Suporte a wildcard processando em fila sequencial
 
 ---
 
 ## 🤝 Contribuindo
 
-Pull requests são bem-vindos. Para mudanças maiores, abra uma issue primeiro descrevendo o que você gostaria de alterar — principalmente se envolver a matriz de perfis ou o cálculo de bitrate, pra manter a filosofia de "uma codificação só, sem otimização iterativa".
+Pull requests são bem-vindos. Para mudanças maiores, abra uma issue primeiro descrevendo o que você gostaria de alterar.
 
 ---
 
