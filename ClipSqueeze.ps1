@@ -304,6 +304,26 @@ function Read-ProgressTail {
     }
 }
 
+function Show-NotificacaoConclusao {
+    param(
+        [string]$titulo,
+        [string]$mensagem,
+        [ValidateSet("Info", "Warning", "Error")]
+        [string]$tipo = "Info"
+    )
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        $notify = New-Object System.Windows.Forms.NotifyIcon
+        $notify.Icon = [System.Drawing.SystemIcons]::Information
+        $notify.Visible = $true
+        $notify.ShowBalloonTip(5000, $titulo, $mensagem, [System.Windows.Forms.ToolTipIcon]::$tipo)
+        Start-Sleep -Seconds 4
+        $notify.Dispose()
+    } catch {
+        # Notificação é só um extra — se falhar (ex: ambiente sem GUI), o script segue normalmente
+    }
+}
+
 function Compress-Video {
     param(
         [Parameter(Mandatory=$true, Position=0)]
@@ -452,6 +472,7 @@ function Compress-Video {
         Copy-Item $stderrLog $logErro -ErrorAction SilentlyContinue
         Write-Host "`nErro na compressão (código $($proc.ExitCode))." -ForegroundColor Red
         Write-Host "Log completo salvo em: $logErro" -ForegroundColor Yellow
+        Show-NotificacaoConclusao -titulo "ClipSqueeze — Erro" -mensagem "$($item.Name): falha na compressão. Veja o log em $logErro" -tipo "Error"
         Remove-Item $stdoutLog, $stderrLog, $progressFile -ErrorAction SilentlyContinue
         return
     }
@@ -476,6 +497,8 @@ function Compress-Video {
     Write-Host "Tamanho original: $([math]::Round($tamanhoOriginal / 1MB, 1)) MB"
     Write-Host "Tamanho final: $([math]::Round($tamanhoFinal / 1MB, 1)) MB"
     Write-Host "Redução: $reducaoPct%"
+
+    Show-NotificacaoConclusao -titulo "ClipSqueeze — Concluído" -mensagem "$($item.Name): $([math]::Round($tamanhoFinal / 1MB, 1)) MB (redução de $reducaoPct%)" -tipo "Info"
 
     Remove-Item $stdoutLog, $stderrLog, $progressFile -ErrorAction SilentlyContinue
 }
