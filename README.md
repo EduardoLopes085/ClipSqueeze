@@ -155,6 +155,13 @@ Cada perfil representa uma **intenção**, implementada de forma diferente depen
 | `efficient` | Prioriza arquivo pequeno mantendo a qualidade-alvo | `preset veryslow`, `crf 23` | `quality quality`, `qvbr 26` |
 | `quality` | Prioriza fidelidade visual acima de tudo | `preset slow`, `crf 18` | `quality quality`, `qvbr 20` |
 
+> **Note sobre `efficient` vs `quality`**: os dois nomes parecem sinônimos, mas representam objetivos diferentes.
+>
+> - **`efficient`** mantém o **mesmo alvo de qualidade** do perfil `balanced` (mesmo CRF na CPU, mesmo `qvbr_quality_level` na GPU), mas usa uma configuração de codificação mais custosa (preset `veryslow` na CPU, `quality` no `-quality` da GPU) para extrair mais eficiência de compressão *nesse mesmo nível de qualidade* — o resultado tende a ser um arquivo menor com fidelidade visual parecida, ao custo de mais tempo de processamento.
+> - **`quality`** muda o **alvo em si** (CRF mais baixo, `qvbr_quality_level` mais baixo), priorizando fidelidade visual acima do tamanho do arquivo — o resultado tende a ser um arquivo maior.
+>
+> Ou seja: `efficient` responde "quero a mesma qualidade gastando menos espaço", enquanto `quality` responde "quero mais qualidade, mesmo custando mais espaço".
+
 > Na GPU, o modo de controle de taxa usado é `qvbr` (Quality Variable Bitrate) — o equivalente mais próximo do CRF que o encoder de hardware da AMD oferece.
 
 ---
@@ -255,6 +262,7 @@ Alguns bugs que apareceram durante o desenvolvimento e valem registrar, porque n
 - [ ] Flag `-Force` para uso não-interativo, ideal pra automação
 - [ ] Compressão de um trecho específico do vídeo (corte por tempo inicial/final)
 - [ ] Suporte a lote — processar vários arquivos via wildcard em fila sequencial
+- [ ] Manipulação do container de vídeo do resultado da compressão 
 
 ---
 

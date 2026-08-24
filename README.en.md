@@ -155,6 +155,15 @@ Each profile represents an **intent**, implemented differently depending on the 
 | `efficient` | Smaller file while keeping the target quality | `preset veryslow`, `crf 23` | `quality quality`, `qvbr 26` |
 | `quality` | Prioritizes visual fidelity above everything | `preset slow`, `crf 18` | `quality quality`, `qvbr 20` |
 
+> **Note on `efficient` vs `quality`:** The two names seem synonymous, but they represent different objectives.
+
+>
+> - **`efficient`** maintains the **same quality target** as the `balanced` profile (same CRF on the CPU, same `qvbr_quality_level` on the GPU), but uses a more expensive encoding configuration (preset `veryslow` on the CPU, `quality` on the `-quality` of the GPU) to extract more compression efficiency *at that same quality level* — the result tends to be a smaller file with similar visual fidelity, at the cost of more processing time.
+
+> - **`quality`** changes the **target itself** (lower CRF, lower `qvbr_quality_level`), prioritizing visual fidelity over file size — the result tends to be a larger file.
+
+>
+> In other words: `efficient` answers "I want the same quality using less space", while `quality` answers "I want more quality, even if it costs more space".
 > On GPU, the rate control mode used is `qvbr` (Quality Variable Bitrate) — the closest equivalent to CRF that AMD's hardware encoder offers.
 
 ---
