@@ -257,7 +257,7 @@ function Build-FfmpegArgs {
             $v = $bitrateAlvo.BitrateVideoKbps
             $controle = "-b:v ${v}k -maxrate ${v}k -bufsize $($v * 2)k"
         }
-        return ('-i "{0}" -vf scale=1920:-2 -c:v libx265 -preset {1} {2} -c:a aac -b:a {3}k -y -progress "{4}" -nostats "{5}"' -f `
+        return ('-i "{0}" -vf scale=w=1920:h=1080:force_original_aspect_ratio=decrease:force_divisible_by=2 -c:v libx265 -preset {1} {2} -c:a aac -b:a {3}k -y -progress "{4}" -nostats "{5}"' -f `
                 $entrada, $config.preset, $controle, $audioKbps, $progressFile, $saida)
     }
     else {
@@ -268,7 +268,7 @@ function Build-FfmpegArgs {
             $v = $bitrateAlvo.BitrateVideoKbps
             $controle = "-rc vbr_peak -b:v ${v}k -maxrate ${v}k -bufsize $($v * 2)k"
         }
-        return ('-i "{0}" -vf scale=1920:-2 -c:v hevc_amf -quality {1} {2} -c:a aac -b:a {3}k -y -progress "{4}" -nostats "{5}"' -f `
+        return ('-i "{0}" -vf scale=w=1920:h=1080:force_original_aspect_ratio=decrease:force_divisible_by=2 -c:v hevc_amf -quality {1} {2} -c:a aac -b:a {3}k -y -progress "{4}" -nostats "{5}"' -f `
                 $entrada, $config.quality, $controle, $audioKbps, $progressFile, $saida)
     }
 }
@@ -417,7 +417,7 @@ function Compress-Video {
             (" Progresso: [{0}] {1}%" -f $barra, $percent),
             "",
             (" Acelerador: $($p.Acelerador) | Perfil: $($p.Perfil) | Limite: $limiteTexto"),
-            (" Saída: 1920x-2"),
+            (" Saída: até 1920x1080 (sem upscale)"),
             "=============================================================",
             ""
         )
