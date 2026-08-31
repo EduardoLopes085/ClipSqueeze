@@ -124,7 +124,8 @@ function Resolve-ParametrosComprimir {
     param(
         [string]$acelerador,
         [string]$perfil = "balanced",
-        [string]$limiteStr
+        [string]$limiteStr,
+        [string]$container = "mp4"
     )
 
     $aceleradoresValidos = @("cpu", "gpu")
@@ -143,6 +144,13 @@ function Resolve-ParametrosComprimir {
     $perfilNormalizado = $perfil.ToLower()
     if ($perfisValidos -notcontains $perfilNormalizado) {
         Write-Host "Perfil inválido: '$perfil'. Use: $($perfisValidos -join ', ')" -ForegroundColor Red
+        return $null
+    }
+
+    $containersValidos = @("mp4", "mkv", "mov")
+    $containerNormalizado = $container.ToLower()
+    if ($containersValidos -notcontains $containerNormalizado) {
+        Write-Host "Container inválido: '$container'. Use: $($containersValidos -join ', ')" -ForegroundColor Red
         return $null
     }
 
@@ -177,6 +185,7 @@ function Resolve-ParametrosComprimir {
         Perfil      = $perfilNormalizado
         LimiteBytes = $limiteBytes
         LimiteTexto = $limiteStr
+        Container   = $containerNormalizado
     }
 }
 
@@ -341,12 +350,13 @@ function Compress-Video {
         [Parameter(Position = 2)]
         [string]$perfil = "balanced",
         [Parameter(Position = 3)]
-        [string]$limite
+        [string]$limite,
+        [string]$container = "mp4"
     )
 
     if (-not (Test-FFmpegInstalado)) { return }
 
-    $p = Resolve-ParametrosComprimir -acelerador $acelerador -perfil $perfil -limiteStr $limite
+    $p = Resolve-ParametrosComprimir -acelerador $acelerador -perfil $perfil -limiteStr $limite -container $container
     if ($null -eq $p) { return }
 
     $item = Resolve-ArquivoVideo $arquivo
@@ -363,7 +373,7 @@ function Compress-Video {
 
     $pasta = $item.DirectoryName
     $nome = $item.BaseName
-    $saida = Join-Path $pasta "$($nome)_comprimido.mp4"
+    $saida = Join-Path $pasta "$($nome)_comprimido.$($p.Container)"
     if (Test-Path $saida) {
         Write-Host "Já existe um arquivo comprimido: $saida" -ForegroundColor Yellow
         $resposta = Read-Host "Sobrescrever? (s/n)"
@@ -496,13 +506,14 @@ function Compress-Video {
         Desenhar-PainelComprimir -percent 100 -decorrido $duracaoTotal -restante "concluído" -velocidade "--"
 
         $arquivoGerado = (Test-Path $saida) -and ((Get-Item $saida).Length -gt 0)
+        $saidaNome = Split-Path $saida -Leaf
 
         if (-not ($proc.ExitCode -eq 0 -or $arquivoGerado)) {
             $logErro = Join-Path $pasta "$($nome)_erro_compressao.log"
             Copy-Item $stderrLog $logErro -ErrorAction SilentlyContinue
             Write-Host "`nErro na compressão (código $($proc.ExitCode))." -ForegroundColor Red
             Write-Host "Log completo salvo em: $logErro" -ForegroundColor Yellow
-            Show-NotificacaoConclusao -titulo "ClipSqueeze — Erro" -mensagem "$($item.Name): falha na compressão. Veja o log em $logErro" -tipo "Error"
+            Show-NotificacaoConclusao -titulo "ClipSqueeze — Erro" -mensagem "${saidaNome}: falha na compressão. Veja o log em $logErro" -tipo "Error"
             return
         }
 
@@ -527,8 +538,9 @@ function Compress-Video {
         Write-Host "Tamanho original: $([math]::Round($tamanhoOriginal / 1MB, 1)) MB"
         Write-Host "Tamanho final: $([math]::Round($tamanhoFinal / 1MB, 1)) MB"
         Write-Host "Redução: $reducaoPct%"
+        Write-Host "Container: $($p.Container)"
 
-        Show-NotificacaoConclusao -titulo "ClipSqueeze — Concluído" -mensagem "$($item.Name): $([math]::Round($tamanhoFinal / 1MB, 1)) MB (redução de $reducaoPct%)" -tipo "Info"
+        Show-NotificacaoConclusao -titulo "ClipSqueeze — Concluído" -mensagem "${saidaNome}: $([math]::Round($tamanhoFinal / 1MB, 1)) MB (redução de $reducaoPct%)" -tipo "Info"
     }
     finally {
         Remove-Item $stdoutLog, $stderrLog, $progressFile -ErrorAction SilentlyContinue
