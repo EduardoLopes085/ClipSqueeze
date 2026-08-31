@@ -125,7 +125,8 @@ function Resolve-ParametrosComprimir {
         [string]$acelerador,
         [string]$perfil = "balanced",
         [string]$limiteStr,
-        [string]$container = "mp4"
+        [string]$container = "mp4",
+        [string]$codec = "hevc"
     )
 
     $aceleradoresValidos = @("cpu", "gpu")
@@ -149,6 +150,13 @@ function Resolve-ParametrosComprimir {
 
     $containersValidos = @("mp4", "mkv", "mov")
     $containerNormalizado = $container.ToLower()
+    $codecsValidos = @("hevc", "h264", "av1")
+    $codecNormalizado = $codec.ToLower()
+    if ($codecsValidos -notcontains $codecNormalizado) {
+        Write-Host "Codec inválido: '$codec'. Use: $($codecsValidos -join ', ')" -ForegroundColor Red
+        return $null
+    }
+
     if ($containersValidos -notcontains $containerNormalizado) {
         Write-Host "Container inválido: '$container'. Use: $($containersValidos -join ', ')" -ForegroundColor Red
         return $null
@@ -174,8 +182,9 @@ function Resolve-ParametrosComprimir {
     }
 
     if ($aceleradorNormalizado -eq "gpu") {
-        if (-not (Test-EncoderDisponivel -nome "hevc_amf")) {
-            Write-Host "Encoder de GPU (hevc_amf) não disponível neste ffmpeg/sistema. Use 'cpu' ou verifique sua instalação/driver." -ForegroundColor Red
+        $encoderGpu = $CodecEncoderGpu[$codecNormalizado]
+        if (-not (Test-EncoderDisponivel -nome $encoderGpu)) {
+            Write-Host "Encoder de GPU ($encoderGpu) não disponível neste ffmpeg/sistema. Tente outro -codec, use 'cpu', ou verifique sua instalação/driver." -ForegroundColor Red
             return $null
         }
     }
@@ -186,6 +195,7 @@ function Resolve-ParametrosComprimir {
         LimiteBytes = $limiteBytes
         LimiteTexto = $limiteStr
         Container   = $containerNormalizado
+        Codec       = $codecNormalizado
     }
 }
 
@@ -237,6 +247,12 @@ function Get-BitrateAlvo {
     }
 }
 
+$CodecEncoderGpu = @{
+    hevc = "hevc_amf"
+    h264 = "h264_amf"
+    av1  = "av1_amf"
+}
+
 $PerfisConfig = @{
     cpu = @{
         fast      = @{ preset = "veryfast"; crf = 27 }
@@ -245,10 +261,24 @@ $PerfisConfig = @{
         quality   = @{ preset = "slow"; crf = 18 }
     }
     gpu = @{
-        fast      = @{ quality = "speed"; qvbr = 32 }
-        balanced  = @{ quality = "balanced"; qvbr = 26 }
-        efficient = @{ quality = "quality"; qvbr = 26 }
-        quality   = @{ quality = "quality"; qvbr = 20 }
+        hevc = @{
+            fast      = @{ quality = "speed"; qvbr = 32 }
+            balanced  = @{ quality = "balanced"; qvbr = 26 }
+            efficient = @{ quality = "quality"; qvbr = 26 }
+            quality   = @{ quality = "quality"; qvbr = 20 }
+        }
+        h264 = @{
+            fast      = @{ quality = "speed"; qvbr = 32 }
+            balanced  = @{ quality = "balanced"; qvbr = 26 }
+            efficient = @{ quality = "quality"; qvbr = 26 }
+            quality   = @{ quality = "quality"; qvbr = 20 }
+        }
+        av1  = @{
+            fast      = @{ quality = "speed"; qvbr = 32 }
+            balanced  = @{ quality = "balanced"; qvbr = 26 }
+            efficient = @{ quality = "quality"; qvbr = 26 }
+            quality   = @{ quality = "high_quality"; qvbr = 20 }
+        }
     }
 }
 
@@ -261,13 +291,13 @@ function Build-FfmpegArgs {
         $bitrateAlvo = $null
     )
 
-    $config = $PerfisConfig[$parametros.Acelerador][$parametros.Perfil]
     $audioKbps = if ($bitrateAlvo) { $bitrateAlvo.BitrateAudioKbps } else { 128 }
     $filtroEscala = "scale=w=1920:h=1080:force_original_aspect_ratio=decrease:force_divisible_by=2"
 
     $argsBase = @("-i", "`"$entrada`"", "-vf", $filtroEscala)
 
     if ($parametros.Acelerador -eq "cpu") {
+        $config = $PerfisConfig.cpu[$parametros.Perfil]
         $argsCodec = if ($null -eq $bitrateAlvo) {
             @("-c:v", "libx265", "-preset", $config.preset, "-crf", $config.crf)
         }
@@ -277,12 +307,14 @@ function Build-FfmpegArgs {
         }
     }
     else {
+        $encoderGpu = $CodecEncoderGpu[$parametros.Codec]
+        $config = $PerfisConfig.gpu[$parametros.Codec][$parametros.Perfil]
         $argsCodec = if ($null -eq $bitrateAlvo) {
-            @("-c:v", "hevc_amf", "-quality", $config.quality, "-rc", "qvbr", "-qvbr_quality_level", $config.qvbr)
+            @("-c:v", $encoderGpu, "-quality", $config.quality, "-rc", "qvbr", "-qvbr_quality_level", $config.qvbr)
         }
         else {
             $v = $bitrateAlvo.BitrateVideoKbps
-            @("-c:v", "hevc_amf", "-quality", $config.quality, "-rc", "vbr_peak", "-b:v", "${v}k", "-maxrate", "${v}k", "-bufsize", "$($v * 2)k")
+            @("-c:v", $encoderGpu, "-quality", $config.quality, "-rc", "vbr_peak", "-b:v", "${v}k", "-maxrate", "${v}k", "-bufsize", "$($v * 2)k")
         }
     }
 
@@ -351,12 +383,13 @@ function Compress-Video {
         [string]$perfil = "balanced",
         [Parameter(Position = 3)]
         [string]$limite,
-        [string]$container = "mp4"
+        [string]$container = "mp4",
+        [string]$codec = "hevc"
     )
 
     if (-not (Test-FFmpegInstalado)) { return }
 
-    $p = Resolve-ParametrosComprimir -acelerador $acelerador -perfil $perfil -limiteStr $limite -container $container
+    $p = Resolve-ParametrosComprimir -acelerador $acelerador -perfil $perfil -limiteStr $limite -container $container -codec $codec
     if ($null -eq $p) { return }
 
     $item = Resolve-ArquivoVideo $arquivo
@@ -425,17 +458,13 @@ function Compress-Video {
     $inicio = Get-Date
 
     try {
-        $linhasPainel = 13
-        for ($i = 0; $i -lt $linhasPainel; $i++) { Write-Host "" }
-        $topoPainel = [Console]::CursorTop - $linhasPainel
-
-        function Desenhar-PainelComprimir {
+        function Build-LinhasPainel {
             param($percent, $decorrido, $restante, $velocidade)
             $largura = 40
             $preenchido = [math]::Floor($largura * ($percent / 100))
             $barra = ("#" * $preenchido).PadRight($largura, "-")
             $limiteTexto = if ($p.LimiteTexto) { $p.LimiteTexto } else { "livre" }
-            $linhas = @(
+            return @(
                 "=============================================",
                 " Previsão de compressão",
                 "=============================================",
@@ -446,15 +475,26 @@ function Compress-Video {
                 (" Progresso: [{0}] {1}%" -f $barra, $percent),
                 "",
                 (" Acelerador: $($p.Acelerador) | Perfil: $($p.Perfil) | Limite: $limiteTexto"),
+                (" Codec: $($p.Codec) | Container: $($p.Container)"),
                 (" Saída: até 1920x1080 (sem upscale)"),
                 "=============================================================",
                 ""
             )
+        }
+
+        $linhasPainel = (Build-LinhasPainel -percent 0 -decorrido "" -restante "" -velocidade "").Count
+        for ($i = 0; $i -lt $linhasPainel; $i++) { Write-Host "" }
+        $topoPainel = [Console]::CursorTop - $linhasPainel
+
+        function Desenhar-PainelComprimir {
+            param($percent, $decorrido, $restante, $velocidade)
+            $linhas = Build-LinhasPainel -percent $percent -decorrido $decorrido -restante $restante -velocidade $velocidade
             [Console]::SetCursorPosition(0, $topoPainel)
             foreach ($linha in $linhas) {
                 Write-Host $linha.PadRight([Console]::WindowWidth - 1)
             }
         }
+    
 
         $restante = "calculando..."
         $ultimoCalculo = $inicio
@@ -539,6 +579,7 @@ function Compress-Video {
         Write-Host "Tamanho final: $([math]::Round($tamanhoFinal / 1MB, 1)) MB"
         Write-Host "Redução: $reducaoPct%"
         Write-Host "Container: $($p.Container)"
+        if ($p.Acelerador -eq "gpu") { Write-Host "Codec: $($p.Codec)" }
 
         Show-NotificacaoConclusao -titulo "ClipSqueeze — Concluído" -mensagem "${saidaNome}: $([math]::Round($tamanhoFinal / 1MB, 1)) MB (redução de $reducaoPct%)" -tipo "Info"
     }
