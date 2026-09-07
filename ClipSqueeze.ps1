@@ -129,7 +129,7 @@ function Resolve-ParametrosComprimir {
         [string]$codec = "hevc"
     )
 
-    $aceleradoresValidos = @("cpu", "gpu")
+    $aceleradoresValidos = @("cpu", "amd", "nvidia")
     $perfisValidos = @("fast", "balanced", "efficient", "quality")
 
     if ([string]::IsNullOrWhiteSpace($acelerador)) {
@@ -181,10 +181,10 @@ function Resolve-ParametrosComprimir {
         }
     }
 
-    if ($aceleradorNormalizado -eq "gpu") {
-        $encoderGpu = $CodecEncoderGpu[$codecNormalizado]
+    if ($aceleradoresGpu -contains $aceleradorNormalizado) {
+        $encoderGpu = $CodecEncoder[$aceleradorNormalizado][$codecNormalizado]
         if (-not (Test-EncoderDisponivel -nome $encoderGpu)) {
-            Write-Host "Encoder de GPU ($encoderGpu) não disponível neste ffmpeg/sistema. Tente outro -codec, use 'cpu', ou verifique sua instalação/driver." -ForegroundColor Red
+            Write-Host "Encoder $encoderGpu não disponível neste ffmpeg/sistema. Tente outro -codec, outro acelerador, ou verifique sua instalação/driver." -ForegroundColor Red
             return $null
         }
     }
@@ -247,20 +247,29 @@ function Get-BitrateAlvo {
     }
 }
 
-$CodecEncoderGpu = @{
-    hevc = "hevc_amf"
-    h264 = "h264_amf"
-    av1  = "av1_amf"
+$CodecEncoder = @{
+    amd    = @{
+        hevc = "hevc_amf"
+        h264 = "h264_amf"
+        av1  = "av1_amf"
+    }
+    nvidia = @{
+        hevc = "hevc_nvenc"
+        h264 = "h264_nvenc"
+        av1  = "av1_nvenc"
+    }
 }
 
+$aceleradoresGpu = @("amd", "nvidia")
+
 $PerfisConfig = @{
-    cpu = @{
+    cpu    = @{
         fast      = @{ preset = "veryfast"; crf = 27 }
         balanced  = @{ preset = "medium"; crf = 23 }
         efficient = @{ preset = "veryslow"; crf = 23 }
         quality   = @{ preset = "slow"; crf = 18 }
     }
-    gpu = @{
+    amd    = @{
         hevc = @{
             fast      = @{ quality = "speed"; qvbr = 32 }
             balanced  = @{ quality = "balanced"; qvbr = 26 }
@@ -280,6 +289,26 @@ $PerfisConfig = @{
             quality   = @{ quality = "high_quality"; qvbr = 20 }
         }
     }
+    nvidia = @{
+        hevc = @{
+            fast      = @{ preset = "p2"; cq = 32 }
+            balanced  = @{ preset = "p4"; cq = 26 }
+            efficient = @{ preset = "p6"; cq = 26 }
+            quality   = @{ preset = "p7"; cq = 20 }
+        }
+        h264 = @{
+            fast      = @{ preset = "p2"; cq = 32 }
+            balanced  = @{ preset = "p4"; cq = 26 }
+            efficient = @{ preset = "p6"; cq = 26 }
+            quality   = @{ preset = "p7"; cq = 20 }
+        }
+        av1  = @{
+            fast      = @{ preset = "p2"; cq = 40 }
+            balanced  = @{ preset = "p4"; cq = 32 }
+            efficient = @{ preset = "p6"; cq = 32 }
+            quality   = @{ preset = "p7"; cq = 25 }
+        }
+    }
 }
 
 function Build-FfmpegArgs {
@@ -293,7 +322,6 @@ function Build-FfmpegArgs {
 
     $audioKbps = if ($bitrateAlvo) { $bitrateAlvo.BitrateAudioKbps } else { 128 }
     $filtroEscala = "scale=w=1920:h=1080:force_original_aspect_ratio=decrease:force_divisible_by=2"
-
     $argsBase = @("-i", "`"$entrada`"", "-vf", $filtroEscala)
 
     if ($parametros.Acelerador -eq "cpu") {
@@ -306,15 +334,27 @@ function Build-FfmpegArgs {
             @("-c:v", "libx265", "-preset", $config.preset, "-b:v", "${v}k", "-maxrate", "${v}k", "-bufsize", "$($v * 2)k")
         }
     }
-    else {
-        $encoderGpu = $CodecEncoderGpu[$parametros.Codec]
-        $config = $PerfisConfig.gpu[$parametros.Codec][$parametros.Perfil]
+    elseif ($parametros.Acelerador -eq "amd") {
+        $encoder = $CodecEncoder.amd[$parametros.Codec]
+        $config = $PerfisConfig.amd[$parametros.Codec][$parametros.Perfil]
         $argsCodec = if ($null -eq $bitrateAlvo) {
-            @("-c:v", $encoderGpu, "-quality", $config.quality, "-rc", "qvbr", "-qvbr_quality_level", $config.qvbr)
+            @("-c:v", $encoder, "-quality", $config.quality, "-rc", "qvbr", "-qvbr_quality_level", $config.qvbr)
         }
         else {
             $v = $bitrateAlvo.BitrateVideoKbps
-            @("-c:v", $encoderGpu, "-quality", $config.quality, "-rc", "vbr_peak", "-b:v", "${v}k", "-maxrate", "${v}k", "-bufsize", "$($v * 2)k")
+            @("-c:v", $encoder, "-quality", $config.quality, "-rc", "vbr_peak", "-b:v", "${v}k", "-maxrate", "${v}k", "-bufsize", "$($v * 2)k")
+        }
+    }
+    else {
+        # nvidia
+        $encoder = $CodecEncoder.nvidia[$parametros.Codec]
+        $config = $PerfisConfig.nvidia[$parametros.Codec][$parametros.Perfil]
+        $argsCodec = if ($null -eq $bitrateAlvo) {
+            @("-c:v", $encoder, "-preset", $config.preset, "-rc", "vbr", "-cq", $config.cq, "-b:v", "0")
+        }
+        else {
+            $v = $bitrateAlvo.BitrateVideoKbps
+            @("-c:v", $encoder, "-preset", $config.preset, "-rc", "vbr", "-b:v", "${v}k", "-maxrate", "${v}k", "-bufsize", "$($v * 2)k")
         }
     }
 
@@ -579,7 +619,7 @@ function Compress-Video {
         Write-Host "Tamanho final: $([math]::Round($tamanhoFinal / 1MB, 1)) MB"
         Write-Host "Redução: $reducaoPct%"
         Write-Host "Container: $($p.Container)"
-        if ($p.Acelerador -eq "gpu") { Write-Host "Codec: $($p.Codec)" }
+        if ($aceleradoresGpu -contains $p.Acelerador) { Write-Host "Codec: $($p.Codec)" }
 
         Show-NotificacaoConclusao -titulo "ClipSqueeze — Concluído" -mensagem "${saidaNome}: $([math]::Round($tamanhoFinal / 1MB, 1)) MB (redução de $reducaoPct%)" -tipo "Info"
     }
