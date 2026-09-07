@@ -1,4 +1,4 @@
-<#
+﻿<#
     ClipSqueeze
     Compressão de vídeo simplificada via FFmpeg (CPU ou GPU) para PowerShell.
 
