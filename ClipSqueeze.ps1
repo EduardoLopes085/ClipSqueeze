@@ -120,6 +120,27 @@ function Test-EncoderDisponivel {
     }
 }
 
+function Get-DicaErroConhecido {
+    param([string]$log)
+
+    $padroesConhecidos = @(
+        @{ Regex = "does not support the required nvenc API version|minimum required Nvidia driver"
+            Dica = "O driver da NVIDIA nesta máquina está desatualizado para a versão do NVENC exigida por este FFmpeg. Atualize o driver em nvidia.com/drivers e tente novamente." 
+        }
+        @{ Regex = "Cannot load nvcuda\.dll|no CUDA-capable device"
+            Dica = "Não foi possível inicializar CUDA/NVENC nesta GPU. Verifique se o driver NVIDIA está instalado e se a GPU está realmente ativa (não em modo híbrido/desligada)." 
+        }
+        @{ Regex = "Failed to initialise AMF|Failed to open AMF"
+            Dica = "Não foi possível inicializar o driver AMD (AMF). Verifique se o driver da GPU AMD está atualizado." 
+        }
+    )
+
+    foreach ($padrao in $padroesConhecidos) {
+        if ($log -match $padrao.Regex) { return $padrao.Dica }
+    }
+    return $null
+}
+
 function Resolve-ParametrosComprimir {
     param(
         [string]$acelerador,
@@ -592,6 +613,13 @@ function Compress-Video {
             $logErro = Join-Path $pasta "$($nome)_erro_compressao.log"
             Copy-Item $stderrLog $logErro -ErrorAction SilentlyContinue
             Write-Host "`nErro na compressão (código $($proc.ExitCode))." -ForegroundColor Red
+
+            $conteudoErro = Get-Content $stderrLog -Raw -ErrorAction SilentlyContinue
+            $dica = Get-DicaErroConhecido -log $conteudoErro
+            if ($dica) {
+                Write-Host $dica -ForegroundColor Yellow
+            }
+
             Write-Host "Log completo salvo em: $logErro" -ForegroundColor Yellow
             Show-NotificacaoConclusao -titulo "ClipSqueeze — Erro" -mensagem "${saidaNome}: falha na compressão. Veja o log em $logErro" -tipo "Error"
             return
