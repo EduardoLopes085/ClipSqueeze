@@ -1,0 +1,49 @@
+{
+    "schemaVersion": 1,
+    "applicationVersion": "0.1.0",
+    "defaults": {
+        "accelerator": "cpu",
+        "profile": "balanced",
+        "container": "mp4",
+        "codec": "hevc",
+        "resolution": null
+    },
+    "output": {
+        "suffix": "_comprimido",
+        "overwrite": false,
+        "directory": null
+    },
+    "audio": {
+        "codec": "aac",
+        "bitrateKbps": 128
+    },
+    "bitrateCalc": {
+        "safetyMargin": 0.92,
+        "lowBitrateWarningKbps": 300
+    },
+    "resolutionPresets": {
+        "hd": 1280,
+        "fhd": 1920,
+        "qhd": 2560,
+        "4k": 3840
+    },
+    "profileOverrides": {
+        "cpu": {},
+        "amd": {},
+        "nvidia": {}
+    },
+    "ffmpeg": {
+        "packageId": "Gyan.FFmpeg"
+    },
+    "notifications": {
+        "enabled": true
+    },
+    "ui": {
+        "progressBarWidth": 40,
+        "colors": true
+    },
+    "logging": {
+        "keepErrorLogs": true,
+        "directory": null
+    }
+}
