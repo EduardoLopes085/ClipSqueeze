@@ -252,17 +252,17 @@ Alguns bugs que apareceram durante o desenvolvimento e valem registrar, porque n
 
 ## 🗺️ Roadmap
 
-- [ ] Seletor de codec (H.264 / H.265 / AV1) independente do acelerador
-- [ ] Suporte a NVIDIA (NVENC) e Intel (QuickSync)
-- [ ] Resolução de saída configurável (hoje fixa em `1920:-2`)
+- [x] Seletor de codec (H.264 / H.265 / AV1) independente do acelerador
+- [x] Suporte a NVIDIA (NVENC)
+- [x] Manipulação do container de saída (mp4 / mkv / mov)
+- [x] Notificação nativa do Windows ao concluir a compressão
+- [x] Tradução de erros conhecidos do FFmpeg (ex: driver de GPU desatualizado) em dicas legíveis
+- [ ] Resolução de saída selecionável pelo usuário (hoje: sempre até 1920x1080, sem upscale)
 - [ ] Reescrita/limpeza de metadados do vídeo final
-- [ ] Instalação do FFmpeg também via Chocolatey/Scoop, além do winget
-- [ ] Notificação nativa do Windows ao concluir a compressão
 - [ ] Publicar como módulo PowerShell (`.psd1`) na PowerShell Gallery
 - [ ] Flag `-Force` para uso não-interativo, ideal pra automação
 - [ ] Compressão de um trecho específico do vídeo (corte por tempo inicial/final)
 - [ ] Suporte a lote — processar vários arquivos via wildcard em fila sequencial
-- [ ] Manipulação do container de vídeo do resultado da compressão 
 
 ---
 

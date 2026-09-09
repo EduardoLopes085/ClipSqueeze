@@ -294,20 +294,20 @@ $PerfisConfig = @{
         hevc = @{
             fast      = @{ quality = "speed"; qvbr = 32 }
             balanced  = @{ quality = "balanced"; qvbr = 26 }
-            efficient = @{ quality = "quality"; qvbr = 26 }
-            quality   = @{ quality = "quality"; qvbr = 20 }
+            efficient = @{ quality = "quality"; qvbr = 23 }
+            quality   = @{ quality = "quality"; qvbr = 18 }
         }
         h264 = @{
             fast      = @{ quality = "speed"; qvbr = 32 }
             balanced  = @{ quality = "balanced"; qvbr = 26 }
-            efficient = @{ quality = "quality"; qvbr = 26 }
-            quality   = @{ quality = "quality"; qvbr = 20 }
+            efficient = @{ quality = "quality"; qvbr = 23 }
+            quality   = @{ quality = "quality"; qvbr = 18 }
         }
         av1  = @{
             fast      = @{ quality = "speed"; qvbr = 32 }
             balanced  = @{ quality = "balanced"; qvbr = 26 }
-            efficient = @{ quality = "quality"; qvbr = 26 }
-            quality   = @{ quality = "high_quality"; qvbr = 20 }
+            efficient = @{ quality = "quality"; qvbr = 23 }
+            quality   = @{ quality = "high_quality"; qvbr = 18 }
         }
     }
     nvidia = @{
