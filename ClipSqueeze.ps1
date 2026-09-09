@@ -147,7 +147,8 @@ function Resolve-ParametrosComprimir {
         [string]$perfil = "balanced",
         [string]$limiteStr,
         [string]$container = "mp4",
-        [string]$codec = "hevc"
+        [string]$codec = "hevc",
+        [string]$resolution
     )
 
     $aceleradoresValidos = @("cpu", "amd", "nvidia")
@@ -181,6 +182,15 @@ function Resolve-ParametrosComprimir {
     if ($containersValidos -notcontains $containerNormalizado) {
         Write-Host "Container inválido: '$container'. Use: $($containersValidos -join ', ')" -ForegroundColor Red
         return $null
+    }
+
+    $resolucaoNormalizada = $null
+    if (-not [string]::IsNullOrWhiteSpace($resolution)) {
+        $resolucaoNormalizada = $resolution.ToLower()
+        if (-not $ResolucaoPresets.ContainsKey($resolucaoNormalizada)) {
+            Write-Host "Resolução inválida: '$resolution'. Use: $($ResolucaoPresets.Keys -join ', ')" -ForegroundColor Red
+            return $null
+        }
     }
 
     $limiteBytes = $null
@@ -217,6 +227,7 @@ function Resolve-ParametrosComprimir {
         LimiteTexto = $limiteStr
         Container   = $containerNormalizado
         Codec       = $codecNormalizado
+        Resolucao   = $resolucaoNormalizada
     }
 }
 
@@ -332,6 +343,13 @@ $PerfisConfig = @{
     }
 }
 
+$ResolucaoPresets = @{
+    hd   = 1280
+    fhd  = 1920
+    qhd  = 2560
+    "4k" = 3840
+}
+
 function Build-FfmpegArgs {
     param(
         [Parameter(Mandatory = $true)] $parametros,
@@ -342,7 +360,14 @@ function Build-FfmpegArgs {
     )
 
     $audioKbps = if ($bitrateAlvo) { $bitrateAlvo.BitrateAudioKbps } else { 128 }
-    $filtroEscala = "scale=w=1920:h=1080:force_original_aspect_ratio=decrease:force_divisible_by=2"
+
+    if ($parametros.Resolucao) {
+        $lado = $ResolucaoPresets[$parametros.Resolucao]
+        $filtroEscala = "scale=w='if(gte(iw,ih),${lado},-2)':h='if(lt(iw,ih),${lado},-2)'"
+    } else {
+        $filtroEscala = "scale=w=1920:h=1080:force_original_aspect_ratio=decrease:force_divisible_by=2"
+    }
+
     $argsBase = @("-i", "`"$entrada`"", "-vf", $filtroEscala)
 
     if ($parametros.Acelerador -eq "cpu") {
@@ -445,12 +470,13 @@ function Compress-Video {
         [Parameter(Position = 3)]
         [string]$limite,
         [string]$container = "mp4",
-        [string]$codec = "hevc"
+        [string]$codec = "hevc",
+        [string]$resolution
     )
 
     if (-not (Test-FFmpegInstalado)) { return }
 
-    $p = Resolve-ParametrosComprimir -acelerador $acelerador -perfil $perfil -limiteStr $limite -container $container -codec $codec
+    $p = Resolve-ParametrosComprimir -acelerador $acelerador -perfil $perfil -limiteStr $limite -container $container -codec $codec -resolution $resolution
     if ($null -eq $p) { return }
 
     $item = Resolve-ArquivoVideo $arquivo
@@ -525,6 +551,7 @@ function Compress-Video {
             $preenchido = [math]::Floor($largura * ($percent / 100))
             $barra = ("#" * $preenchido).PadRight($largura, "-")
             $limiteTexto = if ($p.LimiteTexto) { $p.LimiteTexto } else { "livre" }
+            $saidaTexto = if ($p.Resolucao) { "$($p.Resolucao.ToUpper()) (upscale/downscale conforme necessário)" } else { "até 1920x1080 (sem upscale)" }
             return @(
                 "=============================================",
                 " Previsão de compressão",
@@ -537,7 +564,7 @@ function Compress-Video {
                 "",
                 (" Acelerador: $($p.Acelerador) | Perfil: $($p.Perfil) | Limite: $limiteTexto"),
                 (" Codec: $($p.Codec) | Container: $($p.Container)"),
-                (" Saída: até 1920x1080 (sem upscale)"),
+                (" Saída: $saidaTexto"),
                 "=============================================================",
                 ""
             )
@@ -648,6 +675,7 @@ function Compress-Video {
         Write-Host "Redução: $reducaoPct%"
         Write-Host "Container: $($p.Container)"
         if ($aceleradoresGpu -contains $p.Acelerador) { Write-Host "Codec: $($p.Codec)" }
+        if ($p.Resolucao) { Write-Host "Resolução: $($p.Resolucao.ToUpper())" }
 
         Show-NotificacaoConclusao -titulo "ClipSqueeze — Concluído" -mensagem "${saidaNome}: $([math]::Round($tamanhoFinal / 1MB, 1)) MB (redução de $reducaoPct%)" -tipo "Info"
     }
