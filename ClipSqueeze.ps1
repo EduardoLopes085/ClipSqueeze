@@ -164,9 +164,9 @@ function Repair-ClipSqueezeConfig {
     }
 
     foreach ($secao in @(
-        "defaults", "output", "audio", "bitrateCalc", "resolutionPresets",
-        "profileOverrides", "ffmpeg", "notifications", "ui", "logging"
-    )) {
+            "defaults", "output", "audio", "bitrateCalc", "resolutionPresets",
+            "profileOverrides", "ffmpeg", "notifications", "ui", "logging"
+        )) {
         if ($Config.ContainsKey($secao) -and $Config[$secao] -isnot [hashtable]) {
             $Config[$secao] = $Padrao[$secao].Clone()
         }
@@ -709,21 +709,33 @@ function Build-FfmpegArgs {
     if ($parametros.Resolucao) {
         $lado = $ResolucaoPresets[$parametros.Resolucao]
         $filtroEscalaCpu = "scale=w='if(gte(iw,ih),${lado},-2)':h='if(lt(iw,ih),${lado},-2)'"
-        $filtroEscalaGpu = "scale_d3d11=w='if(gte(iw,ih),${lado},-2)':h='if(lt(iw,ih),${lado},-2)'"
-    } else {
+    }
+    else {
         $filtroEscalaCpu = "scale=w=1920:h=1080:force_original_aspect_ratio=decrease:force_divisible_by=2"
-        $filtroEscalaGpu = "scale_d3d11=w=1920:h=1080"
     }
 
     # AMD:
-    # Mantém decodificação, escala e encode no caminho de hardware D3D11.
+    # Decodifica em D3D11, baixa os frames para a memória do sistema,
+    # escala usando o filtro CPU e envia novamente para D3D11 antes do
+    # encode via AMF.
     if ($parametros.Acelerador -eq "amd") {
         $encoder = $CodecEncoder.amd[$parametros.Codec]
         $config = $PerfisConfig.amd[$parametros.Codec][$parametros.Perfil]
 
+        if ($parametros.Resolucao) {
+            $lado = $ResolucaoPresets[$parametros.Resolucao]
+            $filtroEscalaGpu = "hwdownload,format=nv12,scale=w='if(gte(iw,ih),${lado},-2)':h='if(lt(iw,ih),${lado},-2)',format=nv12,hwupload"
+        }
+        else {
+            $filtroEscalaGpu = "hwdownload,format=nv12,scale=w=1920:h=1080:force_original_aspect_ratio=decrease:force_divisible_by=2,format=nv12,hwupload"
+        }
+
         $argsBase = @(
+            "-init_hw_device", "d3d11va=amd",
+            "-filter_hw_device", "amd",
             "-hwaccel", "d3d11va",
             "-hwaccel_output_format", "d3d11",
+            "-extra_hw_frames", "32",
             "-i", "`"$entrada`"",
             "-vf", $filtroEscalaGpu
         )
@@ -963,7 +975,8 @@ function Compress-Video {
     $dirConfigurado = $ClipSqueezeConfig.output.directory
     $pastaSaida = if ([string]::IsNullOrWhiteSpace($dirConfigurado) -or $dirConfigurado.Trim().ToLower() -eq "source") {
         $pasta
-    } else {
+    }
+    else {
         $dirConfigurado
     }
     if (-not (Test-Path $pastaSaida -PathType Container)) {
