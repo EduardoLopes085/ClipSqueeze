@@ -17,11 +17,331 @@
 
     Veja o README para detalhes de instalação, perfis disponíveis e como
     o cálculo de limite de tamanho funciona.
+
+    Configuração: se existir um config.json na mesma pasta deste script,
+    seus valores sobrescrevem os padrões abaixo (por chave — não precisa
+    conter todas). Sem config.json, o comportamento é idêntico ao anterior.
 #>
 
+# ============================================================
+# Configuração (config.json)
+# ============================================================
+# Tudo nesta seção é aditivo: se não houver config.json, ou se ele
+# estiver incompleto/inválido, o script usa os mesmos valores que
+# sempre foram hardcoded — nenhum comportamento muda por padrão.
+
+function ConvertTo-HashtableDeep {
+    # Converte recursivamente o objeto retornado por ConvertFrom-Json
+    # (PSCustomObject) em Hashtable aninhada, pra podermos fazer merge
+    # com os padrões abaixo. Evita depender de 'ConvertFrom-Json -AsHashtable',
+    # que só existe no PowerShell 6+ (este script roda em 5.1 também).
+    param($InputObject)
+
+    if ($null -eq $InputObject) { return $null }
+
+    if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) {
+        $lista = @()
+        foreach ($item in $InputObject) {
+            $lista += , (ConvertTo-HashtableDeep $item)
+        }
+        return , $lista
+    }
+
+    if ($InputObject -is [PSCustomObject]) {
+        $tabela = @{}
+        foreach ($propriedade in $InputObject.PSObject.Properties) {
+            $tabela[$propriedade.Name] = ConvertTo-HashtableDeep $propriedade.Value
+        }
+        return $tabela
+    }
+
+    return $InputObject
+}
+
+function Merge-ConfigHashtable {
+    # Merge raso->profundo: para cada chave em $Override, se os dois lados
+    # forem Hashtable, mescla recursivamente; senão, $Override vence.
+    # Chaves ausentes em $Override simplesmente mantêm o valor de $Base.
+    param(
+        [hashtable]$Base,
+        [hashtable]$Override
+    )
+
+    $resultado = $Base.Clone()
+    if ($null -eq $Override) { return $resultado }
+
+    foreach ($chave in $Override.Keys) {
+        if ($resultado.ContainsKey($chave) -and $resultado[$chave] -is [hashtable] -and $Override[$chave] -is [hashtable]) {
+            $resultado[$chave] = Merge-ConfigHashtable -Base $resultado[$chave] -Override $Override[$chave]
+        }
+        else {
+            $resultado[$chave] = $Override[$chave]
+        }
+    }
+
+    return $resultado
+}
+
+function Repair-ParametrosPerfil {
+    param(
+        [hashtable]$Config,
+        [hashtable]$Padrao
+    )
+
+    if ($null -eq $Config.profileOverrides -or $Config.profileOverrides -isnot [hashtable]) {
+        $Config.profileOverrides = $Padrao.profileOverrides.Clone()
+        return $Config
+    }
+
+    $resultado = @{
+        cpu    = @{}
+        amd    = @{}
+        nvidia = @{}
+    }
+
+    foreach ($acelerador in @("cpu", "amd", "nvidia")) {
+        $origem = $Config.profileOverrides[$acelerador]
+        if ($origem -isnot [hashtable]) { continue }
+
+        if ($acelerador -eq "cpu") {
+            foreach ($perfil in @("fast", "balanced", "efficient", "quality")) {
+                $perfilConfig = $origem[$perfil]
+                if ($perfilConfig -isnot [hashtable]) { continue }
+
+                $filtrado = @{}
+                foreach ($chave in @("preset", "crf")) {
+                    if ($perfilConfig.ContainsKey($chave)) {
+                        $filtrado[$chave] = $perfilConfig[$chave]
+                    }
+                }
+                if ($filtrado.Count -gt 0) {
+                    $resultado.cpu[$perfil] = $filtrado
+                }
+            }
+        }
+        else {
+            foreach ($codec in @("hevc", "h264", "av1")) {
+                $codecConfig = $origem[$codec]
+                if ($codecConfig -isnot [hashtable]) { continue }
+
+                foreach ($perfil in @("fast", "balanced", "efficient", "quality")) {
+                    $perfilConfig = $codecConfig[$perfil]
+                    if ($perfilConfig -isnot [hashtable]) { continue }
+
+                    $permitidos = if ($acelerador -eq "amd") {
+                        @("quality", "qvbr")
+                    }
+                    else {
+                        @("preset", "cq")
+                    }
+
+                    $filtrado = @{}
+                    foreach ($chave in $permitidos) {
+                        if ($perfilConfig.ContainsKey($chave)) {
+                            $filtrado[$chave] = $perfilConfig[$chave]
+                        }
+                    }
+                    if ($filtrado.Count -gt 0) {
+                        $resultado[$acelerador][$codec][$perfil] = $filtrado
+                    }
+                }
+            }
+        }
+    }
+
+    $Config.profileOverrides = $resultado
+    return $Config
+}
+
+function Repair-ClipSqueezeConfig {
+    param(
+        [hashtable]$Config,
+        [hashtable]$Padrao
+    )
+
+    if ($null -eq $Config -or $Config -isnot [hashtable]) {
+        return $Padrao
+    }
+
+    foreach ($secao in @(
+        "defaults", "output", "audio", "bitrateCalc", "resolutionPresets",
+        "profileOverrides", "ffmpeg", "notifications", "ui", "logging"
+    )) {
+        if ($Config.ContainsKey($secao) -and $Config[$secao] -isnot [hashtable]) {
+            $Config[$secao] = $Padrao[$secao].Clone()
+        }
+    }
+
+    if ($Config.defaults.accelerator -notin @("cpu", "amd", "nvidia")) {
+        $Config.defaults.accelerator = $Padrao.defaults.accelerator
+    }
+    if ($Config.defaults.profile -notin @("fast", "balanced", "efficient", "quality")) {
+        $Config.defaults.profile = $Padrao.defaults.profile
+    }
+    if ($Config.defaults.container -notin @("mp4", "mkv", "mov")) {
+        $Config.defaults.container = $Padrao.defaults.container
+    }
+    if ($Config.defaults.codec -notin @("hevc", "h264", "av1")) {
+        $Config.defaults.codec = $Padrao.defaults.codec
+    }
+
+    if ($null -ne $Config.defaults.resolution) {
+        $resolucao = [string]$Config.defaults.resolution
+        if ([string]::IsNullOrWhiteSpace($resolucao) -or
+            -not $Config.resolutionPresets.ContainsKey($resolucao.ToLower())) {
+            $Config.defaults.resolution = $Padrao.defaults.resolution
+        }
+        else {
+            $Config.defaults.resolution = $resolucao.ToLower()
+        }
+    }
+
+    if ($Config.output.suffix -isnot [string] -or [string]::IsNullOrWhiteSpace($Config.output.suffix)) {
+        $Config.output.suffix = $Padrao.output.suffix
+    }
+    elseif ($Config.output.suffix.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+        $Config.output.suffix = $Padrao.output.suffix
+    }
+
+    if ($Config.output.overwrite -isnot [bool]) {
+        $Config.output.overwrite = $Padrao.output.overwrite
+    }
+
+    if ($Config.audio.codec -isnot [string] -or [string]::IsNullOrWhiteSpace($Config.audio.codec)) {
+        $Config.audio.codec = $Padrao.audio.codec
+    }
+    if ($Config.audio.bitrateKbps -isnot [int] -or $Config.audio.bitrateKbps -le 0) {
+        $Config.audio.bitrateKbps = $Padrao.audio.bitrateKbps
+    }
+
+    if ($Config.bitrateCalc.safetyMargin -isnot [double] -or
+        $Config.bitrateCalc.safetyMargin -le 0 -or
+        $Config.bitrateCalc.safetyMargin -gt 1) {
+        $Config.bitrateCalc.safetyMargin = $Padrao.bitrateCalc.safetyMargin
+    }
+    if ($Config.bitrateCalc.lowBitrateWarningKbps -isnot [int] -or
+        $Config.bitrateCalc.lowBitrateWarningKbps -le 0) {
+        $Config.bitrateCalc.lowBitrateWarningKbps = $Padrao.bitrateCalc.lowBitrateWarningKbps
+    }
+
+    foreach ($chave in @("hd", "fhd", "qhd", "4k")) {
+        if (-not $Config.resolutionPresets.ContainsKey($chave) -or
+            $Config.resolutionPresets[$chave] -isnot [int] -or
+            $Config.resolutionPresets[$chave] -le 0) {
+            $Config.resolutionPresets[$chave] = $Padrao.resolutionPresets[$chave]
+        }
+    }
+
+    if ($Config.ffmpeg.packageId -isnot [string] -or [string]::IsNullOrWhiteSpace($Config.ffmpeg.packageId)) {
+        $Config.ffmpeg.packageId = $Padrao.ffmpeg.packageId
+    }
+
+    if ($Config.notifications.enabled -isnot [bool]) {
+        $Config.notifications.enabled = $Padrao.notifications.enabled
+    }
+
+    if ($Config.ui.progressBarWidth -isnot [int] -or $Config.ui.progressBarWidth -lt 10) {
+        $Config.ui.progressBarWidth = $Padrao.ui.progressBarWidth
+    }
+    if ($Config.ui.colors -isnot [bool]) {
+        $Config.ui.colors = $Padrao.ui.colors
+    }
+
+    if ($Config.logging.keepErrorLogs -isnot [bool]) {
+        $Config.logging.keepErrorLogs = $Padrao.logging.keepErrorLogs
+    }
+
+    return Repair-ParametrosPerfil -Config $Config -Padrao $Padrao
+}
+
+function Get-ClipSqueezeConfig {
+    param([string]$caminho)
+
+    if ([string]::IsNullOrWhiteSpace($caminho)) {
+        $pastaScript = if ($PSScriptRoot) { $PSScriptRoot } elseif ($MyInvocation.PSCommandPath) { Split-Path -Parent $MyInvocation.PSCommandPath } else { $null }
+        if ([string]::IsNullOrWhiteSpace($pastaScript)) { $pastaScript = "." }
+        $caminho = Join-Path $pastaScript "config.json"
+    }
+
+    # Estes são EXATAMENTE os valores que já estavam hardcoded no script
+    # antes do config.json existir. Servem de piso: qualquer chave que
+    # faltar no config.json do usuário cai aqui.
+    $configPadrao = @{
+        schemaVersion      = 1
+        applicationVersion = "0.1.0"
+        defaults           = @{
+            accelerator = "cpu"
+            profile     = "balanced"
+            container   = "mp4"
+            codec       = "hevc"
+            resolution  = $null
+        }
+        output             = @{
+            suffix    = "_comprimido"
+            overwrite = $false
+            directory = $null
+        }
+        audio              = @{
+            codec       = "aac"
+            bitrateKbps = 128
+        }
+        bitrateCalc        = @{
+            safetyMargin          = 0.92
+            lowBitrateWarningKbps = 300
+        }
+        resolutionPresets  = @{
+            hd   = 1280
+            fhd  = 1920
+            qhd  = 2560
+            "4k" = 3840
+        }
+        profileOverrides   = @{
+            cpu    = @{}
+            amd    = @{}
+            nvidia = @{}
+        }
+        ffmpeg             = @{
+            packageId = "Gyan.FFmpeg"
+        }
+        notifications      = @{
+            enabled = $true
+        }
+        ui                 = @{
+            progressBarWidth = 40
+            colors           = $true
+        }
+        logging            = @{
+            keepErrorLogs = $true
+            directory     = $null
+        }
+    }
+
+    if (-not (Test-Path $caminho -PathType Leaf)) {
+        return $configPadrao
+    }
+
+    try {
+        $jsonTexto = Get-Content -Path $caminho -Raw -ErrorAction Stop
+        $jsonObjeto = $jsonTexto | ConvertFrom-Json -ErrorAction Stop
+        $configUsuario = ConvertTo-HashtableDeep -InputObject $jsonObjeto
+        $configMesclado = Merge-ConfigHashtable -Base $configPadrao -Override $configUsuario
+        return Repair-ClipSqueezeConfig -Config $configMesclado -Padrao $configPadrao
+    }
+    catch {
+        Write-Host "Aviso: não foi possível ler '$caminho' ($($_.Exception.Message)). Usando configurações padrão." -ForegroundColor Yellow
+        return $configPadrao
+    }
+}
+
+# Carregada uma vez, no escopo de topo do script — mesmo padrão que
+# $PerfisConfig e $ResolucaoPresets já usavam antes (variável "solta",
+# sem prefixo de escopo, visível pelas funções definidas abaixo).
+$ClipSqueezeConfig = Get-ClipSqueezeConfig
+
 function Install-FFmpegViaWinget {
-    Write-Host "Instalando ffmpeg via winget (Gyan.FFmpeg)..." -ForegroundColor Cyan
-    winget install --id Gyan.FFmpeg -e --accept-source-agreements --accept-package-agreements
+    $packageId = $ClipSqueezeConfig.ffmpeg.packageId
+    Write-Host "Instalando ffmpeg via winget ($packageId)..." -ForegroundColor Cyan
+    winget install --id $packageId -e --accept-source-agreements --accept-package-agreements
     if ($LASTEXITCODE -ne 0) { return $false }
 
     # Tenta atualizar o PATH da sessão atual sem precisar reabrir o terminal
@@ -50,7 +370,7 @@ function Test-FFmpegInstalado {
         return $false
     }
 
-    $resposta = Read-Host "Deseja instalar o ffmpeg agora via winget (pacote Gyan.FFmpeg)? (s/n)"
+    $resposta = Read-Host "Deseja instalar o ffmpeg agora via winget (pacote $($ClipSqueezeConfig.ffmpeg.packageId))? (s/n)"
     if ($resposta -ne "s") {
         Write-Host "Instalação cancelada." -ForegroundColor Yellow
         return $false
@@ -144,12 +464,28 @@ function Get-DicaErroConhecido {
 function Resolve-ParametrosComprimir {
     param(
         [string]$acelerador,
-        [string]$perfil = "balanced",
+        [string]$perfil,
         [string]$limiteStr,
-        [string]$container = "mp4",
-        [string]$codec = "hevc",
+        [string]$container,
+        [string]$codec,
         [string]$resolution
     )
+
+    # Cada default abaixo vem do config.json quando disponível; se
+    # $ClipSqueezeConfig não existir por algum motivo, cai nos mesmos
+    # literais que o script sempre usou.
+    if ([string]::IsNullOrWhiteSpace($perfil)) {
+        $perfil = if ($ClipSqueezeConfig) { $ClipSqueezeConfig.defaults.profile } else { "balanced" }
+    }
+    if ([string]::IsNullOrWhiteSpace($container)) {
+        $container = if ($ClipSqueezeConfig) { $ClipSqueezeConfig.defaults.container } else { "mp4" }
+    }
+    if ([string]::IsNullOrWhiteSpace($codec)) {
+        $codec = if ($ClipSqueezeConfig) { $ClipSqueezeConfig.defaults.codec } else { "hevc" }
+    }
+    if ([string]::IsNullOrWhiteSpace($resolution) -and $ClipSqueezeConfig -and $ClipSqueezeConfig.defaults.resolution) {
+        $resolution = $ClipSqueezeConfig.defaults.resolution
+    }
 
     $aceleradoresValidos = @("cpu", "amd", "nvidia")
     $perfisValidos = @("fast", "balanced", "efficient", "quality")
@@ -235,9 +571,14 @@ function Get-DuracaoVideo {
     param([string]$caminho)
     $culturaInvariante = [System.Globalization.CultureInfo]::InvariantCulture
     $estiloNumerico = [System.Globalization.NumberStyles]::Float
-    $duracaoStr = ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 $caminho
+    $duracaoStr = ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 $caminho 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ffprobe falhou ao ler a duração de '$caminho' (código $LASTEXITCODE): $duracaoStr" -ForegroundColor Red
+        return $null
+    }
     $duracao = 0
     if (-not [double]::TryParse($duracaoStr, $estiloNumerico, $culturaInvariante, [ref]$duracao) -or $duracao -le 0) {
+        Write-Host "ffprobe não retornou uma duração válida para '$caminho'." -ForegroundColor Red
         return $null
     }
     return $duracao
@@ -247,8 +588,9 @@ function Get-BitrateAlvo {
     param(
         [double]$duracaoSegundos,
         [long]$limiteBytes,
-        [int]$bitrateAudioKbps = 128,
-        [double]$margemSeguranca = 0.92   # 8% de folga pro overhead do container
+        [int]$bitrateAudioKbps = $(if ($ClipSqueezeConfig) { $ClipSqueezeConfig.audio.bitrateKbps } else { 128 }),
+        [double]$margemSeguranca = $(if ($ClipSqueezeConfig) { $ClipSqueezeConfig.bitrateCalc.safetyMargin } else { 0.92 }),  # folga pro overhead do container — configurável via bitrateCalc.safetyMargin
+        [int]$avisoBitrateBaixoKbps = $(if ($ClipSqueezeConfig) { $ClipSqueezeConfig.bitrateCalc.lowBitrateWarningKbps } else { 300 })
     )
 
     if ($duracaoSegundos -le 0 -or $limiteBytes -le 0) {
@@ -267,7 +609,7 @@ function Get-BitrateAlvo {
         return $null
     }
 
-    if ($bitrateVideoKbps -lt 300) {
+    if ($bitrateVideoKbps -lt $avisoBitrateBaixoKbps) {
         Write-Host "Aviso: bitrate de vídeo calculado ($([math]::Round($bitrateVideoKbps)) kbps) é bem baixo — a qualidade final pode ficar ruim." -ForegroundColor Yellow
     }
 
@@ -343,12 +685,14 @@ $PerfisConfig = @{
     }
 }
 
-$ResolucaoPresets = @{
-    hd   = 1280
-    fhd  = 1920
-    qhd  = 2560
-    "4k" = 3840
-}
+# profileOverrides do config.json por cima dos perfis hardcoded acima.
+# Formato para cpu:        profileOverrides.cpu.<perfil>.<preset|crf>
+# Formato para amd/nvidia: profileOverrides.<amd|nvidia>.<codec>.<perfil>.<parametro>
+# (um nível a mais, pois amd/nvidia têm o codec no meio). Chaves ausentes
+# mantêm o valor hardcoded original.
+$PerfisConfig = Merge-ConfigHashtable -Base $PerfisConfig -Override $ClipSqueezeConfig.profileOverrides
+
+$ResolucaoPresets = $ClipSqueezeConfig.resolutionPresets
 
 function Build-FfmpegArgs {
     param(
@@ -359,60 +703,151 @@ function Build-FfmpegArgs {
         $bitrateAlvo = $null
     )
 
-    $audioKbps = if ($bitrateAlvo) { $bitrateAlvo.BitrateAudioKbps } else { 128 }
+    $audioKbps = if ($bitrateAlvo) { $bitrateAlvo.BitrateAudioKbps } else { $ClipSqueezeConfig.audio.bitrateKbps }
+    $audioCodec = $ClipSqueezeConfig.audio.codec
 
     if ($parametros.Resolucao) {
         $lado = $ResolucaoPresets[$parametros.Resolucao]
-        $filtroEscala = "scale=w='if(gte(iw,ih),${lado},-2)':h='if(lt(iw,ih),${lado},-2)'"
+        $filtroEscalaCpu = "scale=w='if(gte(iw,ih),${lado},-2)':h='if(lt(iw,ih),${lado},-2)'"
+        $filtroEscalaGpu = "scale_d3d11=w='if(gte(iw,ih),${lado},-2)':h='if(lt(iw,ih),${lado},-2)'"
     } else {
-        $filtroEscala = "scale=w=1920:h=1080:force_original_aspect_ratio=decrease:force_divisible_by=2"
+        $filtroEscalaCpu = "scale=w=1920:h=1080:force_original_aspect_ratio=decrease:force_divisible_by=2"
+        $filtroEscalaGpu = "scale_d3d11=w=1920:h=1080"
     }
 
-    $argsBase = @("-i", "`"$entrada`"", "-vf", $filtroEscala)
-
-    if ($parametros.Acelerador -eq "cpu") {
-        $config = $PerfisConfig.cpu[$parametros.Perfil]
-        $argsCodec = if ($null -eq $bitrateAlvo) {
-            @("-c:v", "libx265", "-preset", $config.preset, "-crf", $config.crf)
-        }
-        else {
-            $v = $bitrateAlvo.BitrateVideoKbps
-            @("-c:v", "libx265", "-preset", $config.preset, "-b:v", "${v}k", "-maxrate", "${v}k", "-bufsize", "$($v * 2)k")
-        }
-    }
-    elseif ($parametros.Acelerador -eq "amd") {
+    # AMD:
+    # Mantém decodificação, escala e encode no caminho de hardware D3D11.
+    if ($parametros.Acelerador -eq "amd") {
         $encoder = $CodecEncoder.amd[$parametros.Codec]
         $config = $PerfisConfig.amd[$parametros.Codec][$parametros.Perfil]
+
+        $argsBase = @(
+            "-hwaccel", "d3d11va",
+            "-hwaccel_output_format", "d3d11",
+            "-i", "`"$entrada`"",
+            "-vf", $filtroEscalaGpu
+        )
+
         $argsCodec = if ($null -eq $bitrateAlvo) {
-            @("-c:v", $encoder, "-quality", $config.quality, "-rc", "qvbr", "-qvbr_quality_level", $config.qvbr)
+            @(
+                "-c:v", $encoder,
+                "-quality", $config.quality,
+                "-rc", "qvbr",
+                "-qvbr_quality_level", $config.qvbr
+            )
         }
         else {
             $v = $bitrateAlvo.BitrateVideoKbps
-            @("-c:v", $encoder, "-quality", $config.quality, "-rc", "vbr_peak", "-b:v", "${v}k", "-maxrate", "${v}k", "-bufsize", "$($v * 2)k")
+
+            @(
+                "-c:v", $encoder,
+                "-quality", $config.quality,
+                "-rc", "vbr_peak",
+                "-b:v", "${v}k",
+                "-maxrate", "${v}k",
+                "-bufsize", "$($v * 2)k"
+            )
         }
-    }
-    else {
-        # nvidia
-        $encoder = $CodecEncoder.nvidia[$parametros.Codec]
-        $config = $PerfisConfig.nvidia[$parametros.Codec][$parametros.Perfil]
-        $argsCodec = if ($null -eq $bitrateAlvo) {
-            @("-c:v", $encoder, "-preset", $config.preset, "-rc", "vbr", "-cq", $config.cq, "-b:v", "0")
-        }
-        else {
-            $v = $bitrateAlvo.BitrateVideoKbps
-            @("-c:v", $encoder, "-preset", $config.preset, "-rc", "vbr", "-b:v", "${v}k", "-maxrate", "${v}k", "-bufsize", "$($v * 2)k")
-        }
+
+        return $argsBase + $argsCodec + @(
+            "-c:a", $audioCodec,
+            "-b:a", "${audioKbps}k",
+            "-y",
+            "-progress", "`"$progressFile`"",
+            "-nostats",
+            "`"$saida`""
+        )
     }
 
-    return $argsBase + $argsCodec + @("-c:a", "aac", "-b:a", "${audioKbps}k", "-y", "-progress", "`"$progressFile`"", "-nostats", "`"$saida`"")
+    # CPU continua usando o pipeline original.
+    if ($parametros.Acelerador -eq "cpu") {
+        $argsBase = @(
+            "-i", "`"$entrada`"",
+            "-vf", $filtroEscalaCpu
+        )
+
+        $config = $PerfisConfig.cpu[$parametros.Perfil]
+
+        $argsCodec = if ($null -eq $bitrateAlvo) {
+            @(
+                "-c:v", "libx265",
+                "-preset", $config.preset,
+                "-crf", $config.crf
+            )
+        }
+        else {
+            $v = $bitrateAlvo.BitrateVideoKbps
+
+            @(
+                "-c:v", "libx265",
+                "-preset", $config.preset,
+                "-b:v", "${v}k",
+                "-maxrate", "${v}k",
+                "-bufsize", "$($v * 2)k"
+            )
+        }
+
+        return $argsBase + $argsCodec + @(
+            "-c:a", $audioCodec,
+            "-b:a", "${audioKbps}k",
+            "-y",
+            "-progress", "`"$progressFile`"",
+            "-nostats",
+            "`"$saida`""
+        )
+    }
+
+    # NVIDIA continua usando o pipeline original.
+    $encoder = $CodecEncoder.nvidia[$parametros.Codec]
+    $config = $PerfisConfig.nvidia[$parametros.Codec][$parametros.Perfil]
+
+    $argsBase = @(
+        "-i", "`"$entrada`"",
+        "-vf", $filtroEscalaCpu
+    )
+
+    $argsCodec = if ($null -eq $bitrateAlvo) {
+        @(
+            "-c:v", $encoder,
+            "-preset", $config.preset,
+            "-rc", "vbr",
+            "-cq", $config.cq,
+            "-b:v", "0"
+        )
+    }
+    else {
+        $v = $bitrateAlvo.BitrateVideoKbps
+
+        @(
+            "-c:v", $encoder,
+            "-preset", $config.preset,
+            "-rc", "vbr",
+            "-b:v", "${v}k",
+            "-maxrate", "${v}k",
+            "-bufsize", "$($v * 2)k"
+        )
+    }
+
+    return $argsBase + $argsCodec + @(
+        "-c:a", $audioCodec,
+        "-b:a", "${audioKbps}k",
+        "-y",
+        "-progress", "`"$progressFile`"",
+        "-nostats",
+        "`"$saida`""
+    )
 }
 
 function Get-FpsVideo {
     param([string]$caminho)
     $culturaInvariante = [System.Globalization.CultureInfo]::InvariantCulture
     $estiloNumerico = [System.Globalization.NumberStyles]::Float
-    $fpsStr = ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 $caminho
+    $fpsStr = ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 $caminho 2>&1
     $fps = 0
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ffprobe falhou ao ler o fps de '$caminho' (código $LASTEXITCODE): $fpsStr" -ForegroundColor Red
+        return 0
+    }
     if ($fpsStr -match '^(\d+)/(\d+)$') {
         $num = [double]::Parse($matches[1], $estiloNumerico, $culturaInvariante)
         $den = [double]::Parse($matches[2], $estiloNumerico, $culturaInvariante)
@@ -459,6 +894,36 @@ function Show-NotificacaoConclusao {
     }
 }
 
+function Test-ArquivoSaidaValido {
+    # Validação mínima pós-compressão: o ffmpeg pode retornar ExitCode 0 e ainda
+    # assim deixar um arquivo truncado/inválido em casos raros. Esta função não
+    # confere codec/resolução esperados (isso é responsabilidade de quem chamou
+    # o ffmpeg, já sabemos o que foi pedido) — só confirma que existe um vídeo
+    # de verdade e abrível no caminho de saída.
+    param([string]$caminho)
+
+    if (-not (Test-Path $caminho -PathType Leaf) -or (Get-Item $caminho).Length -le 0) {
+        return [PSCustomObject]@{ Valido = $false; Motivo = "arquivo não existe ou está vazio" }
+    }
+
+    $saidaFfprobe = ffprobe -v error -select_streams v:0 -show_entries "stream=codec_type:format=duration" -of default=noprint_wrappers=1 $caminho 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        return [PSCustomObject]@{ Valido = $false; Motivo = "ffprobe não conseguiu abrir o arquivo ($saidaFfprobe)" }
+    }
+
+    if (-not ($saidaFfprobe -match "codec_type=video")) {
+        return [PSCustomObject]@{ Valido = $false; Motivo = "nenhum stream de vídeo encontrado no arquivo de saída" }
+    }
+
+    $linhaDuracao = $saidaFfprobe | Where-Object { $_ -match "^duration=([\d\.]+)" } | Select-Object -Last 1
+    $duracaoValida = $linhaDuracao -match "^duration=([\d\.]+)" -and [double]$matches[1] -gt 0
+    if (-not $duracaoValida) {
+        return [PSCustomObject]@{ Valido = $false; Motivo = "duração inválida ou ausente no arquivo de saída" }
+    }
+
+    return [PSCustomObject]@{ Valido = $true; Motivo = $null }
+}
+
 function Compress-Video {
     param(
         [Parameter(Mandatory = $true, Position = 0)]
@@ -466,11 +931,11 @@ function Compress-Video {
         [Parameter(Mandatory = $true, Position = 1)]
         [string]$arquivo,
         [Parameter(Position = 2)]
-        [string]$perfil = "balanced",
+        [string]$perfil,
         [Parameter(Position = 3)]
         [string]$limite,
-        [string]$container = "mp4",
-        [string]$codec = "hevc",
+        [string]$container,
+        [string]$codec,
         [string]$resolution
     )
 
@@ -482,7 +947,8 @@ function Compress-Video {
     $item = Resolve-ArquivoVideo $arquivo
     if ($null -eq $item) { return }
 
-    if ($item.BaseName -match '_comprimido$') {
+    $sufixoSaida = $ClipSqueezeConfig.output.suffix
+    if ($sufixoSaida -and $item.BaseName -match [regex]::Escape($sufixoSaida) + '$') {
         Write-Host "Esse arquivo já parece ser resultado de uma compressão anterior ($($item.Name))." -ForegroundColor Yellow
         $respostaRecomprimir = Read-Host "Deseja comprimir mesmo assim? (s/n)"
         if ($respostaRecomprimir -ne "s") {
@@ -493,8 +959,25 @@ function Compress-Video {
 
     $pasta = $item.DirectoryName
     $nome = $item.BaseName
-    $saida = Join-Path $pasta "$($nome)_comprimido.$($p.Container)"
-    if (Test-Path $saida) {
+
+    $dirConfigurado = $ClipSqueezeConfig.output.directory
+    $pastaSaida = if ([string]::IsNullOrWhiteSpace($dirConfigurado) -or $dirConfigurado.Trim().ToLower() -eq "source") {
+        $pasta
+    } else {
+        $dirConfigurado
+    }
+    if (-not (Test-Path $pastaSaida -PathType Container)) {
+        try {
+            New-Item -ItemType Directory -Path $pastaSaida -Force -ErrorAction Stop | Out-Null
+        }
+        catch {
+            Write-Host "Não foi possível criar a pasta de saída configurada ('$pastaSaida'): $($_.Exception.Message)" -ForegroundColor Red
+            return
+        }
+    }
+
+    $saida = Join-Path $pastaSaida "$($nome)$($sufixoSaida).$($p.Container)"
+    if ((Test-Path $saida) -and -not $ClipSqueezeConfig.output.overwrite) {
         Write-Host "Já existe um arquivo comprimido: $saida" -ForegroundColor Yellow
         $resposta = Read-Host "Sobrescrever? (s/n)"
         if ($resposta -ne "s") {
@@ -547,7 +1030,7 @@ function Compress-Video {
     try {
         function Build-LinhasPainel {
             param($percent, $decorrido, $restante, $velocidade)
-            $largura = 40
+            $largura = $ClipSqueezeConfig.ui.progressBarWidth
             $preenchido = [math]::Floor($largura * ($percent / 100))
             $barra = ("#" * $preenchido).PadRight($largura, "-")
             $limiteTexto = if ($p.LimiteTexto) { $p.LimiteTexto } else { "livre" }
@@ -637,8 +1120,6 @@ function Compress-Video {
         $saidaNome = Split-Path $saida -Leaf
 
         if (-not ($proc.ExitCode -eq 0 -or $arquivoGerado)) {
-            $logErro = Join-Path $pasta "$($nome)_erro_compressao.log"
-            Copy-Item $stderrLog $logErro -ErrorAction SilentlyContinue
             Write-Host "`nErro na compressão (código $($proc.ExitCode))." -ForegroundColor Red
 
             $conteudoErro = Get-Content $stderrLog -Raw -ErrorAction SilentlyContinue
@@ -647,8 +1128,21 @@ function Compress-Video {
                 Write-Host $dica -ForegroundColor Yellow
             }
 
-            Write-Host "Log completo salvo em: $logErro" -ForegroundColor Yellow
-            Show-NotificacaoConclusao -titulo "ClipSqueeze — Erro" -mensagem "${saidaNome}: falha na compressão. Veja o log em $logErro" -tipo "Error"
+            $mensagemNotificacao = "${saidaNome}: falha na compressão."
+            if ($ClipSqueezeConfig.logging.keepErrorLogs) {
+                $pastaLog = if ($ClipSqueezeConfig.logging.directory) { $ClipSqueezeConfig.logging.directory } else { $pasta }
+                if (-not (Test-Path $pastaLog -PathType Container)) {
+                    New-Item -ItemType Directory -Path $pastaLog -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+                $logErro = Join-Path $pastaLog "$($nome)_erro_compressao.log"
+                Copy-Item $stderrLog $logErro -ErrorAction SilentlyContinue
+                Write-Host "Log completo salvo em: $logErro" -ForegroundColor Yellow
+                $mensagemNotificacao = "${saidaNome}: falha na compressão. Veja o log em $logErro"
+            }
+
+            if ($ClipSqueezeConfig.notifications.enabled) {
+                Show-NotificacaoConclusao -titulo "ClipSqueeze — Erro" -mensagem $mensagemNotificacao -tipo "Error"
+            }
             return
         }
 
@@ -677,7 +1171,9 @@ function Compress-Video {
         if ($aceleradoresGpu -contains $p.Acelerador) { Write-Host "Codec: $($p.Codec)" }
         if ($p.Resolucao) { Write-Host "Resolução: $($p.Resolucao.ToUpper())" }
 
-        Show-NotificacaoConclusao -titulo "ClipSqueeze — Concluído" -mensagem "${saidaNome}: $([math]::Round($tamanhoFinal / 1MB, 1)) MB (redução de $reducaoPct%)" -tipo "Info"
+        if ($ClipSqueezeConfig.notifications.enabled) {
+            Show-NotificacaoConclusao -titulo "ClipSqueeze — Concluído" -mensagem "${saidaNome}: $([math]::Round($tamanhoFinal / 1MB, 1)) MB (redução de $reducaoPct%)" -tipo "Info"
+        }
     }
     finally {
         Remove-Item $stdoutLog, $stderrLog, $progressFile -ErrorAction SilentlyContinue
