@@ -2,20 +2,20 @@
     "schemaVersion": 1,
     "applicationVersion": "0.1.0",
     "defaults": {
-        "accelerator": "cpu",
-        "profile": "balanced",
+        "accelerator": "amd",
+        "profile": "quality",
         "container": "mp4",
-        "codec": "hevc",
-        "resolution": null
+        "codec": "av1",
+        "resolution": "4k"
     },
     "output": {
-        "suffix": "_comprimido",
+        "suffix": "_compressed",
         "overwrite": false,
         "directory": null
     },
     "audio": {
         "codec": "aac",
-        "bitrateKbps": 128
+        "bitrateKbps": 320
     },
     "bitrateCalc": {
         "safetyMargin": 0.92,
