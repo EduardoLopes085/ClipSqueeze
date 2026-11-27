@@ -145,7 +145,7 @@ Compress-Video <accelerator> <file> [profile] [limit] [-codec <codec>] [-contain
 | `-container` | ❌ | `mp4`, `mkv`, `mov` | `mp4` |
 | `-resolution` | ❌ | `hd`, `fhd`, `qhd`, `4k` | Accelerator's default scaling |
 
-Each resolution preset sets the longer side in pixels. The defaults are 1280 for `hd`, 1920 for `fhd`, 2560 for `qhd`, and 3840 for `4k`. The image preserves its aspect ratio and may be upscaled to reach the preset.
+Each resolution preset sets the longer side in pixels for both landscape and portrait video. The defaults are 1280 for `hd`, 1920 for `fhd`, 2560 for `qhd`, and 3840 for `4k`. An explicit preset can upscale the image, and the output dimensions are adjusted to even numbers.
 
 ### Examples
 
@@ -248,7 +248,8 @@ A few bugs that came up during development and are worth documenting, because th
 
 - CPU encoding uses HEVC (H.265) through `libx265`. Choosing H.264 or AV1 requires a compatible GPU encoder.
 - The available GPU accelerators are AMD AMF and NVIDIA NVENC. Intel Quick Sync remains on the roadmap.
-- With no resolution preset selected, CPU and NVIDIA use proportional scaling with a target of up to 1920×1080. AMD requests 1920×1080 from the D3D11 filter.
+- With no resolution preset selected, the video keeps its aspect ratio and fits within 1920×1080 without upscaling.
+- AMD and NVIDIA use the CPU to decode and resize the video. Encoding runs on the GPU through AMF or NVENC.
 
 ---
 

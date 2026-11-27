@@ -7,28 +7,23 @@
     exatamente igual.
 
     Uso:
-        Compress-Video <acelerador> <arquivo> [perfil] [limite]
-        comprimir <acelerador> <arquivo> [perfil] [limite]
+        comprimir <acelerador> <arquivo> [perfil] [limite] [-resolution <preset>]
 
     Exemplos:
         comprimir cpu "gravacao_reuniao"
-        comprimir gpu "gravacao_reuniao" quality
-        comprimir gpu "gravacao_reuniao" efficient 40mb
+        comprimir cpu "gravacao_reuniao" quality -resolution hd
+        comprimir nvidia "gravacao_reuniao" efficient 40mb -resolution fhd
 
     Veja o README para detalhes de instalação, perfis disponíveis e como
     o cálculo de limite de tamanho funciona.
 
-    Configuração: se existir um config.json na mesma pasta deste script,
-    seus valores sobrescrevem os padrões abaixo (por chave — não precisa
-    conter todas). Sem config.json, o comportamento é idêntico ao anterior.
+    O config.json pode sobrescrever os padrões por chave.
 #>
 
 # ============================================================
 # Configuração (config.json)
 # ============================================================
-# Tudo nesta seção é aditivo: se não houver config.json, ou se ele
-# estiver incompleto/inválido, o script usa os mesmos valores que
-# sempre foram hardcoded — nenhum comportamento muda por padrão.
+# Chaves ausentes ou inválidas usam os padrões internos.
 
 function ConvertTo-HashtableDeep {
     # Converte recursivamente o objeto retornado por ConvertFrom-Json
@@ -240,7 +235,7 @@ function Repair-ClipSqueezeConfig {
         $Config.audio.bitrateKbps = $Padrao.audio.bitrateKbps
     }
 
-    if ($Config.bitrateCalc.safetyMargin -isnot [double] -or
+    if (($Config.bitrateCalc.safetyMargin -isnot [double] -and $Config.bitrateCalc.safetyMargin -isnot [decimal]) -or
         $Config.bitrateCalc.safetyMargin -le 0 -or
         $Config.bitrateCalc.safetyMargin -gt 1) {
         $Config.bitrateCalc.safetyMargin = $Padrao.bitrateCalc.safetyMargin
@@ -253,7 +248,7 @@ function Repair-ClipSqueezeConfig {
     foreach ($chave in @("hd", "fhd", "qhd", "4k")) {
         if (-not $Config.resolutionPresets.ContainsKey($chave) -or
             $Config.resolutionPresets[$chave] -isnot [int] -or
-            $Config.resolutionPresets[$chave] -le 0) {
+            $Config.resolutionPresets[$chave] -lt 2) {
             $Config.resolutionPresets[$chave] = $Padrao.resolutionPresets[$chave]
         }
     }
@@ -266,7 +261,7 @@ function Repair-ClipSqueezeConfig {
         $Config.notifications.enabled = $Padrao.notifications.enabled
     }
 
-    if ($Config.ui.progressBarWidth -isnot [int] -or $Config.ui.progressBarWidth -lt 10) {
+    if ($Config.ui.progressBarWidth -isnot [int] -or $Config.ui.progressBarWidth -lt 10 -or $Config.ui.progressBarWidth -gt 200) {
         $Config.ui.progressBarWidth = $Padrao.ui.progressBarWidth
     }
     if ($Config.ui.colors -isnot [bool]) {
@@ -479,6 +474,9 @@ function Get-DicaErroConhecido {
         @{ Regex = "Failed to initialise AMF|Failed to open AMF"
             Dica = "Não foi possível inicializar o driver AMD (AMF). Verifique se o driver da GPU AMD está atualizado." 
         }
+        @{ Regex = '\[(?:hevc|h264|av1)_amf[^\]]*\]\s+encoder->Init\(\) failed with error 5'
+            Dica = "O encoder AMD AMF recusou os parâmetros. Verifique se o codec e as dimensões de saída são compatíveis com o driver da GPU."
+        }
     )
 
     foreach ($padrao in $padroesConhecidos) {
@@ -557,21 +555,20 @@ function Resolve-ParametrosComprimir {
 
     $limiteBytes = $null
     if (-not [string]::IsNullOrWhiteSpace($limiteStr)) {
-        if ($limiteStr -match '^(\d+(?:[.,]\d+)?)\s*mb$') {
-            $valorTexto = $matches[1] -replace ',', '.'
-            $valorMb = [double]::Parse($valorTexto, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture)
-            if ($valorMb -le 0) {
-                Write-Host "Limite deve ser maior que zero: '$limiteStr'" -ForegroundColor Red
-                return $null
-            }
-            # MB decimal (1 MB = 1.000.000 bytes) — mesma convenção usada pela maioria
-            # dos serviços de upload/redes sociais. Não é MiB (1.048.576 bytes).
-            $limiteBytes = $valorMb * 1000000
-        }
-        else {
+        if ($limiteStr -notmatch '^([0-9]+(?:[.,][0-9]+)?)\s*mb$') {
             Write-Host "Formato de limite inválido: '$limiteStr'. Use algo como '40mb'." -ForegroundColor Red
             return $null
         }
+        $valorTexto = $matches[1].Replace(',', '.')
+        $valorMb = 0D
+        $maximoMb = [decimal]([long]::MaxValue) / 1000000
+        if (-not [decimal]::TryParse($valorTexto, [Globalization.NumberStyles]::AllowDecimalPoint,
+                [Globalization.CultureInfo]::InvariantCulture, [ref]$valorMb) -or
+            $valorMb -lt 0.000001D -or $valorMb -gt $maximoMb) {
+            Write-Host "Limite fora do intervalo aceito: '$limiteStr'." -ForegroundColor Red
+            return $null
+        }
+        $limiteBytes = [long][Math]::Floor($valorMb * 1000000)
     }
 
     if ($aceleradoresGpu -contains $aceleradorNormalizado) {
@@ -593,21 +590,44 @@ function Resolve-ParametrosComprimir {
     }
 }
 
-function Get-DuracaoVideo {
+function Get-MetadadosVideo {
     param([string]$caminho)
-    $culturaInvariante = [System.Globalization.CultureInfo]::InvariantCulture
-    $estiloNumerico = [System.Globalization.NumberStyles]::Float
-    $duracaoStr = ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 $caminho 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "ffprobe falhou ao ler a duração de '$caminho' (código $LASTEXITCODE): $duracaoStr" -ForegroundColor Red
+
+    $PSNativeCommandUseErrorActionPreference = $false
+    try {
+        $json = ffprobe -v error -select_streams V:0 -show_entries 'format=duration:stream=codec_type,duration,avg_frame_rate,r_frame_rate' -of json $caminho 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $json) { return $null }
+        $dados = ConvertFrom-Json -InputObject ($json -join "`n") -ErrorAction Stop
+    }
+    catch {
         return $null
     }
-    $duracao = 0
-    if (-not [double]::TryParse($duracaoStr, $estiloNumerico, $culturaInvariante, [ref]$duracao) -or $duracao -le 0) {
-        Write-Host "ffprobe não retornou uma duração válida para '$caminho'." -ForegroundColor Red
-        return $null
+
+    $streams = $dados.PSObject.Properties['streams']
+    if (-not $streams -or -not $streams.Value) { return $null }
+    $video = $streams.Value[0]
+    $formato = $dados.PSObject.Properties['format']
+    $duracao = 0.0
+    $fps = 0.0
+    $cultura = [Globalization.CultureInfo]::InvariantCulture
+    $estilo = [Globalization.NumberStyles]::Float
+
+    $duracaoContainer = if ($formato) { $formato.Value.PSObject.Properties['duration'] }
+    $duracaoStream = $video.PSObject.Properties['duration']
+    foreach ($entrada in @($duracaoContainer, $duracaoStream)) {
+        if ($entrada -and [double]::TryParse($entrada.Value, $estilo, $cultura, [ref]$duracao) -and
+            $duracao -gt 0 -and $duracao -lt [TimeSpan]::MaxValue.TotalSeconds) { break }
+        $duracao = 0.0
     }
-    return $duracao
+    foreach ($chave in @('avg_frame_rate', 'r_frame_rate')) {
+        $taxa = $video.PSObject.Properties[$chave]
+        if ($taxa -and $taxa.Value -match '^([0-9]+)/([1-9][0-9]*)$') {
+            $fps = [double]$matches[1] / [double]$matches[2]
+            if ($fps -gt 0) { break }
+        }
+    }
+
+    [PSCustomObject]@{ Duracao = $duracao; Fps = $fps }
 }
 
 function Get-BitrateAlvo {
@@ -624,23 +644,29 @@ function Get-BitrateAlvo {
         return $null
     }
 
-    $bitsTotais = $limiteBytes * 8
+    $bitsTotais = [double]$limiteBytes * 8
     $bitrateTotalKbps = ($bitsTotais / $duracaoSegundos) / 1000
     $orcamentoKbps = $bitrateTotalKbps * $margemSeguranca
     $bitrateVideoKbps = $orcamentoKbps - $bitrateAudioKbps
+    $bitrateVideoArredondado = [math]::Round($bitrateVideoKbps)
     $orcamentoMB = [math]::Round(($orcamentoKbps * $duracaoSegundos) / 8 / 1000, 1)
 
-    if ($bitrateVideoKbps -le 0) {
-        Write-Host "O limite de tamanho é pequeno demais pra essa duração (nem o áudio caberia com folga)." -ForegroundColor Red
+    if ($bitrateVideoArredondado -lt 1) {
+        Write-Host "O limite de tamanho é pequeno demais para codificar áudio e vídeo com essa duração." -ForegroundColor Red
+        return $null
+    }
+    # FFmpeg stores the VBV buffer size in a signed 32-bit field, in bits.
+    if ($bitrateVideoArredondado -gt [Math]::Floor([int]::MaxValue / 2000.0)) {
+        Write-Host "O limite de tamanho gera um bitrate fora do intervalo aceito pelo FFmpeg." -ForegroundColor Red
         return $null
     }
 
     if ($bitrateVideoKbps -lt $avisoBitrateBaixoKbps) {
-        Write-Host "Aviso: bitrate de vídeo calculado ($([math]::Round($bitrateVideoKbps)) kbps) é bem baixo — a qualidade final pode ficar ruim." -ForegroundColor Yellow
+        Write-Host "Aviso: bitrate de vídeo calculado ($bitrateVideoArredondado kbps) é bem baixo — a qualidade final pode ficar ruim." -ForegroundColor Yellow
     }
 
     return [PSCustomObject]@{
-        BitrateVideoKbps = [math]::Round($bitrateVideoKbps)
+        BitrateVideoKbps = $bitrateVideoArredondado
         BitrateAudioKbps = $bitrateAudioKbps
         BitrateTotalKbps = [math]::Round($orcamentoKbps)
         OrcamentoMB      = $orcamentoMB
@@ -720,148 +746,68 @@ $PerfisConfig = Merge-ConfigHashtable -Base $PerfisConfig -Override $ClipSqueeze
 
 $ResolucaoPresets = $ClipSqueezeConfig.resolutionPresets
 
+function Get-FiltroEscalaVideo {
+    param([string]$resolucao)
+
+    if ($resolucao) {
+        $lado = $ResolucaoPresets[$resolucao]
+        $lado -= $lado % 2
+        $largura = "if(gte(iw,ih),$lado,-2)"
+        $altura = "if(lt(iw,ih),$lado,-2)"
+        return "scale=w='$largura':h='$altura'"
+    }
+
+    return "scale=w='min(iw,1920)':h='min(ih,1080)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+}
+
 function Build-FfmpegArgs {
     param(
         [Parameter(Mandatory = $true)] $parametros,
         [Parameter(Mandatory = $true)] [string]$entrada,
         [Parameter(Mandatory = $true)] [string]$saida,
-        [Parameter(Mandatory = $true)] [string]$progressFile,
+        [string]$progressFile,
         $bitrateAlvo = $null
     )
 
-    $audioKbps = if ($bitrateAlvo) { $bitrateAlvo.BitrateAudioKbps } else { $ClipSqueezeConfig.audio.bitrateKbps }
-    $audioCodec = $ClipSqueezeConfig.audio.codec
-
-    if ($parametros.Resolucao) {
-        $lado = $ResolucaoPresets[$parametros.Resolucao]
-        $filtroEscalaCpu = "scale=w='if(gte(iw,ih),${lado},-2)':h='if(lt(iw,ih),${lado},-2)'"
-        $filtroEscalaGpu = "scale_d3d11=w='if(gte(iw,ih),${lado},-2)':h='if(lt(iw,ih),${lado},-2)'"
-    } else {
-        $filtroEscalaCpu = "scale=w=1920:h=1080:force_original_aspect_ratio=decrease:force_divisible_by=2"
-        $filtroEscalaGpu = "scale_d3d11=w=1920:h=1080"
+    $acelerador = $parametros.Acelerador
+    $perfil = $parametros.Perfil
+    $codec = $parametros.Codec
+    $cultura = [Globalization.CultureInfo]::InvariantCulture
+    switch ($acelerador) {
+        'cpu' {
+            $encoder = 'libx265'
+            $config = $PerfisConfig.cpu[$perfil]
+            $argsEncoder = @('-preset', $config.preset)
+            $argsQualidade = @('-crf', $config.crf.ToString($cultura))
+        }
+        'amd' {
+            $encoder = $CodecEncoder.amd[$codec]
+            $config = $PerfisConfig.amd[$codec][$perfil]
+            $argsEncoder = @('-quality', $config.quality)
+            $argsQualidade = @('-rc', 'qvbr', '-qvbr_quality_level', $config.qvbr)
+        }
+        'nvidia' {
+            $encoder = $CodecEncoder.nvidia[$codec]
+            $config = $PerfisConfig.nvidia[$codec][$perfil]
+            $argsEncoder = @('-preset', $config.preset, '-rc', 'vbr')
+            $argsQualidade = @('-cq', $config.cq.ToString($cultura), '-b:v', '0')
+        }
+        default { throw "Acelerador inválido: $acelerador" }
     }
 
-    # AMD:
-    # Mantém decodificação, escala e encode no caminho de hardware D3D11.
-    if ($parametros.Acelerador -eq "amd") {
-        $encoder = $CodecEncoder.amd[$parametros.Codec]
-        $config = $PerfisConfig.amd[$parametros.Codec][$parametros.Perfil]
-
-        $argsBase = @(
-            "-hwaccel", "d3d11va",
-            "-hwaccel_output_format", "d3d11",
-            "-i", $entrada,
-            "-vf", $filtroEscalaGpu
-        )
-
-        $argsCodec = if ($null -eq $bitrateAlvo) {
-            @(
-                "-c:v", $encoder,
-                "-quality", $config.quality,
-                "-rc", "qvbr",
-                "-qvbr_quality_level", $config.qvbr
-            )
-        }
-        else {
-            $v = $bitrateAlvo.BitrateVideoKbps
-
-            @(
-                "-c:v", $encoder,
-                "-quality", $config.quality,
-                "-rc", "vbr_peak",
-                "-b:v", "${v}k",
-                "-maxrate", "${v}k",
-                "-bufsize", "$($v * 2)k"
-            )
-        }
-
-        return $argsBase + $argsCodec + @(
-            "-c:a", $audioCodec,
-            "-b:a", "${audioKbps}k",
-            "-y",
-            "-progress", $progressFile,
-            "-nostats",
-            $saida
-        )
-    }
-
-    # CPU continua usando o pipeline original.
-    if ($parametros.Acelerador -eq "cpu") {
-        $argsBase = @(
-            "-i", $entrada,
-            "-vf", $filtroEscalaCpu
-        )
-
-        $config = $PerfisConfig.cpu[$parametros.Perfil]
-
-        $argsCodec = if ($null -eq $bitrateAlvo) {
-            @(
-                "-c:v", "libx265",
-                "-preset", $config.preset,
-                "-crf", $config.crf.ToString([Globalization.CultureInfo]::InvariantCulture)
-            )
-        }
-        else {
-            $v = $bitrateAlvo.BitrateVideoKbps
-
-            @(
-                "-c:v", "libx265",
-                "-preset", $config.preset,
-                "-b:v", "${v}k",
-                "-maxrate", "${v}k",
-                "-bufsize", "$($v * 2)k"
-            )
-        }
-
-        return $argsBase + $argsCodec + @(
-            "-c:a", $audioCodec,
-            "-b:a", "${audioKbps}k",
-            "-y",
-            "-progress", $progressFile,
-            "-nostats",
-            $saida
-        )
-    }
-
-    # NVIDIA continua usando o pipeline original.
-    $encoder = $CodecEncoder.nvidia[$parametros.Codec]
-    $config = $PerfisConfig.nvidia[$parametros.Codec][$parametros.Perfil]
-
-    $argsBase = @(
-        "-i", $entrada,
-        "-vf", $filtroEscalaCpu
-    )
-
-    $argsCodec = if ($null -eq $bitrateAlvo) {
-        @(
-            "-c:v", $encoder,
-            "-preset", $config.preset,
-            "-rc", "vbr",
-            "-cq", $config.cq.ToString([Globalization.CultureInfo]::InvariantCulture),
-            "-b:v", "0"
-        )
-    }
-    else {
+    $audioKbps = $ClipSqueezeConfig.audio.bitrateKbps
+    if ($null -ne $bitrateAlvo) {
+        $audioKbps = $bitrateAlvo.BitrateAudioKbps
         $v = $bitrateAlvo.BitrateVideoKbps
-
-        @(
-            "-c:v", $encoder,
-            "-preset", $config.preset,
-            "-rc", "vbr",
-            "-b:v", "${v}k",
-            "-maxrate", "${v}k",
-            "-bufsize", "$($v * 2)k"
-        )
+        $argsQualidade = @('-b:v', "${v}k", '-maxrate', "${v}k", '-bufsize', "$($v * 2)k")
+        if ($acelerador -eq 'amd') { $argsQualidade = @('-rc', 'vbr_peak') + $argsQualidade }
     }
 
-    return $argsBase + $argsCodec + @(
-        "-c:a", $audioCodec,
-        "-b:a", "${audioKbps}k",
-        "-y",
-        "-progress", $progressFile,
-        "-nostats",
-        $saida
-    )
+    $argsSaida = @('-c:a', $ClipSqueezeConfig.audio.codec, '-b:a', "${audioKbps}k", '-y', '-nostats')
+    if ($progressFile) { $argsSaida += @('-progress', $progressFile) }
+
+    @('-nostdin', '-i', $entrada, '-vf', (Get-FiltroEscalaVideo $parametros.Resolucao), '-c:v', $encoder) +
+        $argsEncoder + $argsQualidade + $argsSaida + @($saida)
 }
 
 function ConvertTo-WindowsArgumentLine {
@@ -894,38 +840,103 @@ function Get-ClipSqueezeOutputFile {
     return $item
 }
 
-function Get-FpsVideo {
+function Read-FfmpegProgress {
     param([string]$caminho)
-    $culturaInvariante = [System.Globalization.CultureInfo]::InvariantCulture
-    $estiloNumerico = [System.Globalization.NumberStyles]::Float
-    $fpsStr = ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 $caminho 2>&1
-    $fps = 0
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "ffprobe falhou ao ler o fps de '$caminho' (código $LASTEXITCODE): $fpsStr" -ForegroundColor Red
-        return 0
+
+    $arquivo = $null
+    $leitor = $null
+    $valores = @{}
+    try {
+        $arquivo = [IO.File]::Open($caminho, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        # Read only the latest progress records. The file grows during encoding.
+        $inicioCauda = [Math]::Max(0, $arquivo.Length - 4096)
+        $null = $arquivo.Seek($inicioCauda, [IO.SeekOrigin]::Begin)
+        $leitor = [IO.StreamReader]::new($arquivo)
+        if ($inicioCauda -gt 0) { $null = $leitor.ReadLine() }
+        $conteudo = $leitor.ReadToEnd()
+        foreach ($linha in [regex]::Matches($conteudo, '(?m)^(frame|out_time_us|speed)=([^\r\n]*)\r?\n')) {
+            $valores[$linha.Groups[1].Value] = $linha.Groups[2].Value.Trim()
+        }
     }
-    if ($fpsStr -match '^(\d+)/(\d+)$') {
-        $num = [double]::Parse($matches[1], $estiloNumerico, $culturaInvariante)
-        $den = [double]::Parse($matches[2], $estiloNumerico, $culturaInvariante)
-        if ($den -gt 0) { $fps = $num / $den }
+    catch [IO.IOException] {
+        # FFmpeg may still be opening the progress file.
     }
-    else {
-        [double]::TryParse($fpsStr, $estiloNumerico, $culturaInvariante, [ref]$fps) | Out-Null
+    finally {
+        if ($leitor) { $leitor.Dispose() }
+        if ($arquivo) { $arquivo.Dispose() }
     }
-    return $fps
+    return $valores
 }
 
-function Read-ProgressTail {
-    param([string]$path)
+function Wait-Compressao {
+    param(
+        [Diagnostics.Process]$processo,
+        [string]$arquivoProgresso,
+        [string]$nome,
+        $metadados
+    )
+
+    if (-not $arquivoProgresso) {
+        $processo.WaitForExit()
+        return
+    }
+
+    $atividade = "Comprimindo $nome"
+    $cronometro = [Diagnostics.Stopwatch]::StartNew()
+    $duracao = $metadados.Duracao
+    $totalFrames = $duracao * $metadados.Fps
+    $cultura = [Globalization.CultureInfo]::InvariantCulture
+    $largura = $ClipSqueezeConfig.ui.progressBarWidth
+    $ultimoPercentual = 0.0
     try {
-        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        $sr = New-Object System.IO.StreamReader($fs)
-        $conteudo = $sr.ReadToEnd()
-        $sr.Close(); $fs.Close()
-        return $conteudo -split "`r?`n"
+        while (-not $processo.WaitForExit(500)) {
+            $progresso = Read-FfmpegProgress $arquivoProgresso
+            $microssegundos = 0L
+            $frames = 0L
+            if ($duracao -gt 0 -and [long]::TryParse($progresso['out_time_us'], [ref]$microssegundos) -and $microssegundos -gt 0) {
+                $fracao = ($microssegundos / 1000000.0) / $duracao
+            }
+            elseif ($totalFrames -gt 0 -and [long]::TryParse($progresso['frame'], [ref]$frames)) {
+                $fracao = $frames / $totalFrames
+            }
+            else {
+                $fracao = $ultimoPercentual / 100
+            }
+
+            $ultimoPercentual = [Math]::Max($ultimoPercentual, [Math]::Min(99, $fracao * 100))
+            $decorrido = $cronometro.Elapsed.ToString('hh\:mm\:ss')
+            $status = "$decorrido decorridos"
+            $velocidade = $progresso['speed']
+            $velocidadeNumerica = 0.0
+            if ($velocidade -match '^([0-9.]+)x$' -and
+                [double]::TryParse($matches[1], [Globalization.NumberStyles]::Float, $cultura, [ref]$velocidadeNumerica)) {
+                $status += " | $velocidade"
+            }
+            $restante = 0.0
+            if ($duracao -gt 0 -and $velocidadeNumerica -gt 0) {
+                $restante = $duracao * (1 - ($ultimoPercentual / 100)) / $velocidadeNumerica
+            }
+            elseif ($ultimoPercentual -gt 0) {
+                $restante = $cronometro.Elapsed.TotalSeconds * (100 / $ultimoPercentual - 1)
+            }
+            if ($restante -gt 0 -and $restante -lt [TimeSpan]::MaxValue.TotalSeconds) {
+                $status += " | restante $([TimeSpan]::FromSeconds($restante).ToString('hh\:mm\:ss'))"
+            }
+
+            if ($duracao -gt 0) {
+                $preenchido = [int][Math]::Floor($largura * ($ultimoPercentual / 100))
+                $barra = ('#' * $preenchido).PadRight($largura, '-')
+                $status = "[$barra] $([Math]::Round($ultimoPercentual, 1))% | $status"
+            }
+            Write-Progress -Activity $atividade -Status $status
+        }
     }
     catch {
-        return @()
+        Write-Verbose "Painel de progresso indisponível: $($_.Exception.Message)"
+        $processo.WaitForExit()
+    }
+    finally {
+        Write-Progress -Activity $atividade -Completed -ErrorAction SilentlyContinue
     }
 }
 
@@ -936,6 +947,7 @@ function Show-NotificacaoConclusao {
         [ValidateSet("Info", "Warning", "Error")]
         [string]$tipo = "Info"
     )
+    $notify = $null
     try {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
         $notify = New-Object System.Windows.Forms.NotifyIcon
@@ -943,41 +955,68 @@ function Show-NotificacaoConclusao {
         $notify.Visible = $true
         $notify.ShowBalloonTip(5000, $titulo, $mensagem, [System.Windows.Forms.ToolTipIcon]::$tipo)
         Start-Sleep -Seconds 4
-        $notify.Dispose()
     }
     catch {
         # Notificação é só um extra — se falhar (ex: ambiente sem GUI), o script segue normalmente
     }
+    finally {
+        if ($notify) { $notify.Dispose() }
+    }
 }
 
 function Test-ArquivoSaidaValido {
-    # Validação mínima pós-compressão: o ffmpeg pode retornar ExitCode 0 e ainda
-    # assim deixar um arquivo truncado/inválido em casos raros. Esta função não
-    # confere codec/resolução esperados (isso é responsabilidade de quem chamou
-    # o ffmpeg, já sabemos o que foi pedido) — só confirma que existe um vídeo
-    # de verdade e abrível no caminho de saída.
     param([string]$caminho)
 
-    if (-not (Test-Path -LiteralPath $caminho -PathType Leaf) -or (Get-Item -LiteralPath $caminho).Length -le 0) {
-        return [PSCustomObject]@{ Valido = $false; Motivo = "arquivo não existe ou está vazio" }
+    $arquivo = Get-Item -LiteralPath $caminho -ErrorAction SilentlyContinue
+    if (-not $arquivo -or $arquivo.Length -le 0) {
+        return [PSCustomObject]@{ Valido = $false; Motivo = 'arquivo não existe ou está vazio' }
     }
-
-    $saidaFfprobe = ffprobe -v error -select_streams v:0 -show_entries "stream=codec_type:format=duration" -of default=noprint_wrappers=1 $caminho 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        return [PSCustomObject]@{ Valido = $false; Motivo = "ffprobe não conseguiu abrir o arquivo ($saidaFfprobe)" }
+    $metadados = Get-MetadadosVideo $caminho
+    if (-not $metadados) {
+        return [PSCustomObject]@{ Valido = $false; Motivo = 'ffprobe não encontrou um vídeo válido no arquivo' }
     }
-
-    if (-not ($saidaFfprobe -match "codec_type=video")) {
-        return [PSCustomObject]@{ Valido = $false; Motivo = "nenhum stream de vídeo encontrado no arquivo de saída" }
+    if ($metadados.Duracao -le 0) {
+        return [PSCustomObject]@{ Valido = $false; Motivo = 'duração inválida ou ausente no arquivo de saída' }
     }
-
-    $linhaDuracao = $saidaFfprobe | Where-Object { $_ -match "^duration=([\d\.]+)" } | Select-Object -Last 1
-    $duracaoValida = $linhaDuracao -match "^duration=([\d\.]+)" -and [double]$matches[1] -gt 0
-    if (-not $duracaoValida) {
-        return [PSCustomObject]@{ Valido = $false; Motivo = "duração inválida ou ausente no arquivo de saída" }
-    }
-
     return [PSCustomObject]@{ Valido = $true; Motivo = $null }
+}
+
+function Resolve-DestinoCompressao {
+    param([IO.FileInfo]$item, [string]$container)
+
+    $pasta = $item.DirectoryName
+    $config = $ClipSqueezeConfig.output
+    $pastaSaida = $config.directory
+    if ([string]::IsNullOrWhiteSpace($pastaSaida) -or $pastaSaida.Trim() -eq 'source') {
+        $pastaSaida = $pasta
+    }
+
+    $provedor = $null
+    $unidade = $null
+    $pastaSaida = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($pastaSaida, [ref]$provedor, [ref]$unidade)
+    if ($provedor.Name -ne 'FileSystem') { throw 'A saída precisa estar no sistema de arquivos.' }
+    Assert-ClipSqueezeOutputDirectory $pastaSaida
+    if (-not [IO.Directory]::Exists($pastaSaida)) {
+        [void][IO.Directory]::CreateDirectory($pastaSaida)
+        Assert-ClipSqueezeOutputDirectory $pastaSaida
+    }
+
+    $saida = [IO.Path]::Combine($pastaSaida, "$($item.BaseName)$($config.suffix).$container")
+    if ([string]::Equals($item.FullName, $saida, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'A saída precisa ser diferente do vídeo original.'
+    }
+    $arquivoExistente = Get-ClipSqueezeOutputFile $saida
+    $sobrescrever = $config.overwrite
+    if ($arquivoExistente -and -not $sobrescrever) {
+        Write-Host "Já existe um arquivo comprimido: $saida" -ForegroundColor Yellow
+        if ((Read-Host 'Sobrescrever? (s/n)') -ne 's') {
+            Write-Host 'Cancelado.'
+            return $null
+        }
+        $sobrescrever = $true
+    }
+
+    [PSCustomObject]@{ Caminho = $saida; Pasta = $pastaSaida; Sobrescrever = $sobrescrever }
 }
 
 function Compress-Video {
@@ -1013,49 +1052,21 @@ function Compress-Video {
         }
     }
 
-    $pasta = $item.DirectoryName
-    $nome = $item.BaseName
-
-    $dirConfigurado = $ClipSqueezeConfig.output.directory
-    $pastaSaida = if ([string]::IsNullOrWhiteSpace($dirConfigurado) -or $dirConfigurado.Trim().ToLower() -eq "source") {
-        $pasta
-    } else {
-        $dirConfigurado
-    }
     try {
-        $provedor = $null
-        $unidade = $null
-        $pastaSaida = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($pastaSaida, [ref]$provedor, [ref]$unidade)
-        if ($provedor.Name -ne 'FileSystem') { throw 'A saída precisa estar no sistema de arquivos.' }
-        Assert-ClipSqueezeOutputDirectory $pastaSaida
-        [void][IO.Directory]::CreateDirectory($pastaSaida)
-        Assert-ClipSqueezeOutputDirectory $pastaSaida
-        $saida = [IO.Path]::Combine($pastaSaida, "$($nome)$($sufixoSaida).$($p.Container)")
-        if ([string]::Equals($item.FullName, $saida, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'A saída precisa ser diferente do vídeo original.'
-        }
-        $arquivoExistente = Get-ClipSqueezeOutputFile $saida
+        $destino = Resolve-DestinoCompressao -item $item -container $p.Container
     }
     catch {
         Write-Host "Não foi possível preparar a saída: $($_.Exception.Message)" -ForegroundColor Red
         return
     }
+    if (-not $destino) { return }
 
-    $sobrescrever = $ClipSqueezeConfig.output.overwrite
-    if ($arquivoExistente -and -not $sobrescrever) {
-        Write-Host "Já existe um arquivo comprimido: $saida" -ForegroundColor Yellow
-        $resposta = Read-Host "Sobrescrever? (s/n)"
-        if ($resposta -ne "s") {
-            Write-Host "Cancelado."
-            return
-        }
-        $sobrescrever = $true
+    $metadados = Get-MetadadosVideo $item.FullName
+    if (-not $metadados) {
+        Write-Host "Não foi possível ler o vídeo '$($item.FullName)' com ffprobe." -ForegroundColor Red
+        return
     }
-
-    $duracao = Get-DuracaoVideo -caminho $item.FullName
-    $fps = Get-FpsVideo -caminho $item.FullName
-    $totalFrames = 0
-    if ($duracao -and $fps -gt 0) { $totalFrames = [math]::Round($duracao * $fps) }
+    $duracao = $metadados.Duracao
 
     $bitrateAlvo = $null
     if ($p.LimiteBytes) {
@@ -1067,14 +1078,19 @@ function Compress-Video {
         if ($null -eq $bitrateAlvo) { return }
     }
 
-    $progressFile = [System.IO.Path]::GetTempFileName()
-    $stdoutLog = [System.IO.Path]::GetTempFileName()
-    $stderrLog = [System.IO.Path]::GetTempFileName()
-
+    $saida = $destino.Caminho
+    $pastaSaida = $destino.Pasta
     $temporario = [IO.Path]::Combine($pastaSaida, ".clipsqueeze-$([guid]::NewGuid().ToString('N')).$($p.Container)")
+    $exibirProgresso = -not [Console]::IsOutputRedirected -and $ProgressPreference -ne 'SilentlyContinue'
+    $progressFile = $null
+    $stdoutLog = $null
+    $stderrLog = $null
     $reserva = $null
     $proc = $null
     try {
+        if ($exibirProgresso) { $progressFile = [IO.Path]::GetTempFileName() }
+        $stdoutLog = [IO.Path]::GetTempFileName()
+        $stderrLog = [IO.Path]::GetTempFileName()
         # Reserve a new file and deny deletion while FFmpeg writes to it.
         Assert-ClipSqueezeOutputDirectory $pastaSaida
         $reserva = [IO.File]::Open($temporario, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
@@ -1084,101 +1100,8 @@ function Compress-Video {
             -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -ErrorAction Stop
         $proc.Handle | Out-Null
         $tamanhoOriginal = $item.Length
-        $inicio = Get-Date
-        function Build-LinhasPainel {
-            param($percent, $decorrido, $restante, $velocidade)
-            $largura = $ClipSqueezeConfig.ui.progressBarWidth
-            $preenchido = [math]::Floor($largura * ($percent / 100))
-            $barra = ("#" * $preenchido).PadRight($largura, "-")
-            $limiteTexto = if ($p.LimiteTexto) { $p.LimiteTexto } else { "livre" }
-            $saidaTexto = if ($p.Resolucao) { "$($p.Resolucao.ToUpper()) (upscale/downscale conforme necessário)" } else { "até 1920x1080 (sem upscale)" }
-            return @(
-                "=============================================",
-                " Previsão de compressão",
-                "=============================================",
-                (" Tempo decorrido : {0}" -f $decorrido),
-                (" Tempo restante  : {0}" -f $restante),
-                (" Velocidade      : {0}" -f $velocidade),
-                "",
-                (" Progresso: [{0}] {1}%" -f $barra, $percent),
-                "",
-                (" Acelerador: $($p.Acelerador) | Perfil: $($p.Perfil) | Limite: $limiteTexto"),
-                (" Codec: $($p.Codec) | Container: $($p.Container)"),
-                (" Saída: $saidaTexto"),
-                "=============================================================",
-                ""
-            )
-        }
-
-        $consoleInterativo = -not [Console]::IsOutputRedirected
-        if ($consoleInterativo) {
-            $linhasPainel = (Build-LinhasPainel -percent 0 -decorrido "" -restante "" -velocidade "").Count
-            for ($i = 0; $i -lt $linhasPainel; $i++) { Write-Host "" }
-            $topoPainel = [Console]::CursorTop - $linhasPainel
-        }
-        else {
-            Write-Host "Comprimindo $($item.Name)..."
-        }
-
-        function Desenhar-PainelComprimir {
-            param($percent, $decorrido, $restante, $velocidade)
-            if (-not $consoleInterativo) { return }
-            $linhas = Build-LinhasPainel -percent $percent -decorrido $decorrido -restante $restante -velocidade $velocidade
-            [Console]::SetCursorPosition(0, $topoPainel)
-            foreach ($linha in $linhas) {
-                Write-Host $linha.PadRight([Console]::WindowWidth - 1)
-            }
-        }
-    
-
-        $restante = "calculando..."
-        $ultimoCalculo = $inicio
-        $percent = 0
-
-        while (-not $proc.HasExited) {
-            Start-Sleep -Milliseconds 500
-            $velocidade = "--"
-            $decorrido = ((Get-Date) - $inicio).ToString("hh\:mm\:ss")
-
-            if ($totalFrames -gt 0 -and (Test-Path $progressFile)) {
-                $linhasProg = Read-ProgressTail -path $progressFile
-
-                $velocidadeNum = 0
-                $linhaVel = $linhasProg | Where-Object { $_ -match '^speed=\s*([\d\.]+)x' } | Select-Object -Last 1
-                if ($linhaVel -match '^speed=\s*([\d\.]+)x') {
-                    $velocidadeNum = [double]$matches[1]
-                    $velocidade = "$($matches[1])x"
-                }
-
-                $linhaFrame = $linhasProg | Where-Object { $_ -match '^frame=\s*(\d+)' } | Select-Object -Last 1
-                if ($linhaFrame -match '^frame=\s*(\d+)') {
-                    $frameAtual = [double]$matches[1]
-                    $percent = [math]::Min(100, [math]::Round(($frameAtual / $totalFrames) * 100, 1))
-
-                    $segundosDesdeUltimoCalculo = ((Get-Date) - $ultimoCalculo).TotalSeconds
-                    if ($percent -gt 0 -and ($restante -eq "calculando..." -or $segundosDesdeUltimoCalculo -ge 5)) {
-                        if ($velocidadeNum -gt 0 -and $duracao) {
-                            $segundosRestantesDeVideo = $duracao * (1 - ($percent / 100))
-                            $restanteSeg = [math]::Max(0, $segundosRestantesDeVideo / $velocidadeNum)
-                        }
-                        else {
-                            $decorridoSeg = ((Get-Date) - $inicio).TotalSeconds
-                            $totalEstimadoSeg = $decorridoSeg / ($percent / 100)
-                            $restanteSeg = [math]::Max(0, $totalEstimadoSeg - $decorridoSeg)
-                        }
-                        $ts = [TimeSpan]::FromSeconds($restanteSeg)
-                        $restante = "$($ts.Hours)h $($ts.Minutes)m $($ts.Seconds)s" -replace "^0h ", ""
-                        $ultimoCalculo = Get-Date
-                    }
-                }
-            }
-
-            Desenhar-PainelComprimir -percent $percent -decorrido $decorrido -restante $restante -velocidade $velocidade
-        }
-
-        $proc.WaitForExit()
-        $duracaoTotal = ((Get-Date) - $inicio).ToString("hh\:mm\:ss")
-        Desenhar-PainelComprimir -percent 100 -decorrido $duracaoTotal -restante "concluído" -velocidade "--"
+        if (-not $exibirProgresso) { Write-Host "Comprimindo $($item.Name)..." }
+        Wait-Compressao -processo $proc -arquivoProgresso $progressFile -nome $item.Name -metadados $metadados
 
         $saidaNome = Split-Path $saida -Leaf
 
@@ -1193,11 +1116,11 @@ function Compress-Video {
 
             $mensagemNotificacao = "${saidaNome}: falha na compressão."
             if ($ClipSqueezeConfig.logging.keepErrorLogs) {
-                $pastaLog = if ($ClipSqueezeConfig.logging.directory) { $ClipSqueezeConfig.logging.directory } else { $pasta }
+                $pastaLog = if ($ClipSqueezeConfig.logging.directory) { $ClipSqueezeConfig.logging.directory } else { $item.DirectoryName }
                 if (-not (Test-Path $pastaLog -PathType Container)) {
                     New-Item -ItemType Directory -Path $pastaLog -Force -ErrorAction SilentlyContinue | Out-Null
                 }
-                $logErro = Join-Path $pastaLog "$($nome)_erro_compressao.log"
+                $logErro = Join-Path $pastaLog "$($item.BaseName)_erro_compressao.log"
                 try {
                     [IO.File]::Copy($stderrLog, $logErro, $false)
                     Write-Host "Log completo salvo em: $logErro" -ForegroundColor Yellow
@@ -1220,7 +1143,7 @@ function Compress-Video {
         $reserva.Dispose()
         Assert-ClipSqueezeOutputDirectory $pastaSaida
         $destinoAtual = Get-ClipSqueezeOutputFile $saida
-        if ($sobrescrever -and $destinoAtual) {
+        if ($destino.Sobrescrever -and $destinoAtual) {
             [IO.File]::Replace($temporario, $saida, [NullString]::Value)
         }
         else {
@@ -1247,7 +1170,8 @@ function Compress-Video {
         Write-Host "Tamanho final: $([math]::Round($tamanhoFinal / 1MB, 1)) MB"
         Write-Host "Redução: $reducaoPct%"
         Write-Host "Container: $($p.Container)"
-        if ($aceleradoresGpu -contains $p.Acelerador) { Write-Host "Codec: $($p.Codec)" }
+        $codecEfetivo = if ($p.Acelerador -eq 'cpu') { 'hevc' } else { $p.Codec }
+        Write-Host "Codec: $codecEfetivo"
         if ($p.Resolucao) { Write-Host "Resolução: $($p.Resolucao.ToUpper())" }
 
         if ($ClipSqueezeConfig.notifications.enabled) {
@@ -1259,8 +1183,14 @@ function Compress-Video {
     }
     finally {
         if ($proc) {
-            if (-not $proc.HasExited) {
-                try { $proc.Kill(); $proc.WaitForExit() } catch { }
+            try {
+                if (-not $proc.HasExited) {
+                    $proc.Kill()
+                    $proc.WaitForExit()
+                }
+            }
+            catch {
+                Write-Verbose "Não foi possível encerrar o FFmpeg durante a limpeza: $($_.Exception.Message)"
             }
             $proc.Dispose()
         }
@@ -1268,7 +1198,9 @@ function Compress-Video {
             $reserva.Dispose()
             Remove-Item -LiteralPath $temporario -ErrorAction SilentlyContinue
         }
-        Remove-Item -LiteralPath $stdoutLog, $stderrLog, $progressFile -ErrorAction SilentlyContinue
+        foreach ($arquivoTemporario in @($stdoutLog, $stderrLog, $progressFile)) {
+            if ($arquivoTemporario) { Remove-Item -LiteralPath $arquivoTemporario -ErrorAction SilentlyContinue }
+        }
     }
 }
 

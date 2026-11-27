@@ -14,7 +14,8 @@ try {
     @{
         notifications = @{ enabled = $false }
         output = @{ suffix = '_test' }
-        resolutionPresets = @{ hd = 160 }
+        resolutionPresets = @{ hd = 160; fhd = 241 }
+        bitrateCalc = @{ safetyMargin = 0.90 }
         audio = @{ codec = 'aac extra marker' }
         profileOverrides = @{
             cpu = @{ fast = @{ preset = 'fast extra marker'; crf = 52 } }
@@ -29,6 +30,41 @@ try {
     if ($PerfisConfig.amd.hevc.fast.quality -ne 'balanced' -or $PerfisConfig.amd.hevc.fast.qvbr -ne 30 -or
         $PerfisConfig.nvidia.hevc.fast.preset -ne 'p3' -or $PerfisConfig.nvidia.hevc.fast.cq -ne 30.5) {
         throw 'Valid GPU profile overrides were not preserved.'
+    }
+    if ([double]$ClipSqueezeConfig.bitrateCalc.safetyMargin -ne 0.9) {
+        throw 'Configured safety margin was not preserved.'
+    }
+
+    $nvidiaParameters = @{ Acelerador = 'nvidia'; Perfil = 'fast'; Codec = 'hevc'; Resolucao = 'hd' }
+    $nvidiaArgs = @(Build-FfmpegArgs -parametros $nvidiaParameters -entrada $inputPath -saida $inputPath)
+    $filtroNvidia = $nvidiaArgs[([array]::IndexOf($nvidiaArgs, '-vf') + 1)]
+    $filtroCpu = Get-FiltroEscalaVideo 'hd'
+    if ($nvidiaArgs -notcontains 'hevc_nvenc' -or $filtroNvidia -ne $filtroCpu -or $nvidiaArgs -contains '-progress') {
+        throw 'NVIDIA did not use the shared resolution filter or headless options.'
+    }
+    $amdParameters = @{ Acelerador = 'amd'; Perfil = 'fast'; Codec = 'hevc'; Resolucao = 'hd' }
+    $amdArgs = @(Build-FfmpegArgs -parametros $amdParameters -entrada $inputPath -saida $inputPath)
+    if ($amdArgs -notcontains 'hevc_amf' -or $amdArgs[([array]::IndexOf($amdArgs, '-vf') + 1)] -ne $filtroCpu) {
+        throw 'AMD did not use the shared resolution filter or the AMF encoder.'
+    }
+    $metadata = Get-MetadadosVideo $inputPath
+    if ($metadata.Fps -ne 24 -or [Math]::Abs($metadata.Duracao - 2) -gt 0.15) {
+        throw 'The input metadata probe did not return the expected duration and frame rate.'
+    }
+    $invalidInput = Join-Path $fixture.FullName 'invalid-input.mp4'
+    [IO.File]::WriteAllText($invalidInput, 'not a video')
+    if (Get-MetadadosVideo $invalidInput) { throw 'The input probe accepted a non-video file.' }
+    if ((Resolve-ParametrosComprimir -acelerador cpu -limiteStr '0,15mb').LimiteBytes -ne 150000 -or
+        (Resolve-ParametrosComprimir -acelerador cpu -limiteStr '100000000000000000000000000000000mb') -or
+        (Get-BitrateAlvo -duracaoSegundos 100 -limiteBytes 1602500 -margemSeguranca 1 -bitrateAudioKbps 128)) {
+        throw 'Bitrate limits were not validated.'
+    }
+
+    $progressPath = Join-Path $fixture.FullName 'progress.txt'
+    [IO.File]::WriteAllText($progressPath, ("frame=1`n" * 1000) + "frame=120`nout_time_us=5000000`nspeed=1.5x`nframe=999")
+    $progress = Read-FfmpegProgress $progressPath
+    if ($progress['frame'] -ne '120' -or $progress['out_time_us'] -ne '5000000' -or $progress['speed'] -ne '1.5x') {
+        throw 'The progress reader lost complete records or used an incomplete line.'
     }
 
     $cases = @(
@@ -56,6 +92,25 @@ try {
         }
         if ($case.MaxBytes -and $output.Length -gt $case.MaxBytes) {
             throw "$($output.Name) exceeded the $($case.MaxBytes)-byte limit."
+        }
+    }
+
+    $dimensionCases = @(
+        @{ Name = 'default'; InputSize = '320x180'; Options = @{}; Expected = '320x180' }
+        @{ Name = 'portrait'; InputSize = '180x320'; Options = @{ resolution = 'hd' }; Expected = '90x160' }
+        @{ Name = 'square'; InputSize = '180x180'; Options = @{ resolution = 'fhd' }; Expected = '240x240' }
+    )
+    foreach ($case in $dimensionCases) {
+        $source = Join-Path $fixture.FullName "$($case.Name).mp4"
+        & ffmpeg -nostdin -hide_banner -loglevel error -f lavfi -i "testsrc2=size=$($case.InputSize):rate=24" -t 1 -c:v mpeg4 $source
+        if ($LASTEXITCODE) { throw "Failed to generate $($case.Name) video." }
+        $options = $case.Options
+        comprimir cpu $source fast @options
+        $outputPath = Join-Path $fixture.FullName "$($case.Name)_test.mp4"
+        if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) { throw "Missing $($case.Name) output." }
+        $size = & ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of 'csv=p=0:s=x' $outputPath
+        if ($LASTEXITCODE -or $size -ne $case.Expected) {
+            throw "Expected $($case.Expected) for $($case.Name), received $size."
         }
     }
 
