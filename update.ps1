@@ -13,8 +13,7 @@
       - Valida owner/repository e HTTPS.
       - Exige o asset ClipSqueeze.ps1 explicitamente.
       - Valida o SHA-256 publicado pelo GitHub antes de instalar.
-      - Por padrão exige assinatura Authenticode válida no arquivo baixado.
-      - Opcionalmente fixa o certificado do mantenedor por thumbprint.
+      - Exige assinatura Authenticode válida do certificado oficial no pacote distribuído.
       - Recusa downgrade.
       - Recusa sobrescrever modificações locais não registradas pelo instalador.
       - Valida o PowerShell do arquivo antes da substituição.
@@ -23,17 +22,9 @@
       - Registra somente informações operacionais; não armazena credenciais.
       - Não eleva privilégios automaticamente.
 
-    Para desenvolvimento, um update unsigned pode ser autorizado explicitamente
-    com -AllowUnsigned. Essa opção NÃO deve ser usada no fluxo normal de usuários.
-
-    Configuração opcional em config.json:
-
-    "update": {
-        "repository": "OWNER/REPOSITORY",
-        "assetName": "ClipSqueeze.ps1",
-        "requireSignature": true,
-        "trustedSignerThumbprint": "THUMBPRINT"
-    }
+    No checkout de código-fonte, informe -TrustedSignerSha256 para verificar
+    atualizações oficiais ou use -AllowUnsigned explicitamente para testes locais.
+    A origem e a política de assinatura são independentes do config.json.
 
 .NOTES
     A versão instalada é obtida de install-state.json criado pelo install.ps1.
@@ -44,6 +35,7 @@
 param(
     [string]$Repository,
     [string]$AssetName,
+    [string]$TrustedSignerSha256,
     [switch]$AllowUnsigned,
     [switch]$NoNotification,
     [switch]$ForceLocalChanges
@@ -61,6 +53,8 @@ $script:LogDirectory = Join-Path $script:InstallRoot 'logs'
 $script:TempDirectory = Join-Path $env:TEMP 'ClipSqueeze-Update'
 $script:LogPath = Join-Path $script:LogDirectory 'update.log'
 $script:DefaultAssetName = 'ClipSqueeze.ps1'
+$script:OfficialRepository = 'EduardoLopes085/ClipSqueeze'
+$script:OfficialSignerSha256 = ''
 $script:GitHubApiVersion = '2026-03-10'
 $script:MaxScriptBytes = 10MB
 $script:BackupPath = Join-Path $script:InstallRoot ('.ClipSqueeze.ps1.update-backup-{0}.bak' -f [guid]::NewGuid().ToString('N'))
@@ -74,8 +68,9 @@ $script:State = $null
 $script:Config = $null
 $script:RollbackNeeded = $false
 $script:UpdateApplied = $false
+$script:InstallRootValidated = $false
 $script:RepositoryResolved = $null
-$script:TrustedSignerThumbprint = $null
+$script:ExpectedSignerSha256 = $null
 $script:RequireSignature = $true
 
 function Write-UpdateLog {
@@ -87,12 +82,14 @@ function Write-UpdateLog {
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $line = '[{0}] [{1}] {2}' -f $timestamp, $Level, $Message
 
-    try {
-        New-Item -ItemType Directory -Path $script:LogDirectory -Force | Out-Null
-        Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8
-    }
-    catch {
-        # O log jamais deve impedir o update.
+    if ($script:InstallRootValidated) {
+        try {
+            New-Item -ItemType Directory -Path $script:LogDirectory -Force | Out-Null
+            Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8
+        }
+        catch {
+            # O log jamais deve impedir o update.
+        }
     }
 
     switch ($Level) {
@@ -146,7 +143,7 @@ function Read-JsonFile {
     }
 
     try {
-        $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
         if ([string]::IsNullOrWhiteSpace($raw)) {
             throw 'arquivo vazio.'
         }
@@ -217,77 +214,35 @@ function Get-OptionalProperty {
 }
 
 function Resolve-UpdateConfiguration {
-    $configUpdate = Get-OptionalProperty -Object $script:Config -Name 'update'
-
-    $configuredRepository = Get-OptionalProperty -Object $configUpdate -Name 'repository'
-    $stateUpdates = Get-OptionalProperty -Object $script:State -Name 'updates'
-    $stateRepository = Get-OptionalProperty -Object $stateUpdates -Name 'repository'
-    $configuredAssetName = Get-OptionalProperty -Object $configUpdate -Name 'assetName'
-    $configuredRequireSignature = Get-OptionalProperty -Object $configUpdate -Name 'requireSignature'
-    $configuredThumbprint = Get-OptionalProperty -Object $configUpdate -Name 'trustedSignerThumbprint'
-
-    if ([string]::IsNullOrWhiteSpace($Repository) -and -not [string]::IsNullOrWhiteSpace([string]$configuredRepository)) {
-        $Repository = [string]$configuredRepository
+    $script:RepositoryResolved = if ($Repository) { $Repository } else { $script:OfficialRepository }
+    $script:AssetName = if ($AssetName) { $AssetName } else { $script:DefaultAssetName }
+    if ($script:AssetName -cne $script:DefaultAssetName) {
+        throw "O atualizador aceita somente o asset '$script:DefaultAssetName'."
     }
-
-    if ([string]::IsNullOrWhiteSpace($Repository) -and -not [string]::IsNullOrWhiteSpace([string]$stateRepository)) {
-        $Repository = [string]$stateRepository
+    if ($script:RepositoryResolved -notmatch '\A[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}\z') {
+        throw 'Repositório inválido. Formato esperado: OWNER/REPOSITORY.'
     }
-
-    if ([string]::IsNullOrWhiteSpace($AssetName) -and -not [string]::IsNullOrWhiteSpace([string]$configuredAssetName)) {
-        $AssetName = [string]$configuredAssetName
-    }
-
-    if ([string]::IsNullOrWhiteSpace($AssetName)) {
-        $AssetName = $script:DefaultAssetName
-    }
-
-    if ($configuredRequireSignature -ne $null) {
-        $script:RequireSignature = [bool]$configuredRequireSignature
-    }
-
+    $script:RequireSignature = -not $AllowUnsigned
     if ($AllowUnsigned) {
-        $script:RequireSignature = $false
+        if ($script:OfficialSignerSha256) { throw '-AllowUnsigned está disponível somente no checkout de desenvolvimento.' }
         Write-UpdateLog 'A verificação de assinatura foi desativada explicitamente com -AllowUnsigned. Uso recomendado somente para desenvolvimento/testes.' 'WARN'
     }
-
-    if (-not [string]::IsNullOrWhiteSpace([string]$configuredThumbprint)) {
-        $script:TrustedSignerThumbprint = ([string]$configuredThumbprint) -replace '\s+', ''
-    }
-
-    if ([string]::IsNullOrWhiteSpace($Repository)) {
-        throw 'Repositório do GitHub não configurado. Use -Repository "OWNER/REPOSITORY" ou adicione update.repository ao config.json.'
-    }
-
-    if ($Repository -match '^https?://') {
-        throw 'Use somente OWNER/REPOSITORY em -Repository. URLs externas não são aceitas.'
-    }
-
-    if ($Repository -notmatch '^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$') {
-        throw "Repositório inválido: '$Repository'. Formato esperado: OWNER/REPOSITORY"
-    }
-
-    if ([IO.Path]::GetFileName($AssetName) -ne $AssetName -or $AssetName -ne 'ClipSqueeze.ps1') {
-        throw "AssetName inválido. Por segurança, o atualizador aceita somente 'ClipSqueeze.ps1'."
-    }
-
-    if ($script:RequireSignature -and -not [string]::IsNullOrWhiteSpace($script:TrustedSignerThumbprint)) {
-        if ($script:TrustedSignerThumbprint -notmatch '^[A-Fa-f0-9]{40}$') {
-            throw 'trustedSignerThumbprint inválido. Informe o thumbprint SHA-1 de 40 caracteres hexadecimais do certificado de assinatura.'
+    else {
+        if ($script:RepositoryResolved -ne $script:OfficialRepository) {
+            throw "A atualização oficial usa somente '$script:OfficialRepository'."
         }
-        $script:TrustedSignerThumbprint = $script:TrustedSignerThumbprint.ToUpperInvariant()
+        $script:ExpectedSignerSha256 = if ($script:OfficialSignerSha256) { $script:OfficialSignerSha256 } else { $TrustedSignerSha256 }
+        if ($script:ExpectedSignerSha256 -notmatch '\A[A-Fa-f0-9]{64}\z') {
+            throw 'Impressão SHA-256 do assinante oficial ausente ou inválida. No checkout, informe -TrustedSignerSha256 a partir de uma fonte confiável.'
+        }
+        if ($TrustedSignerSha256 -and $TrustedSignerSha256 -ne $script:ExpectedSignerSha256) {
+            throw 'O assinante informado difere do assinante oficial fixado neste atualizador.'
+        }
     }
-
-    $script:RepositoryResolved = $Repository
-    $script:AssetName = $AssetName
-
     Write-UpdateLog "Repositório: $script:RepositoryResolved" 'OK'
     Write-UpdateLog "Asset: $script:AssetName" 'OK'
     Write-UpdateLog "Assinatura Authenticode obrigatória: $script:RequireSignature" 'INFO'
 
-    if (-not [string]::IsNullOrWhiteSpace($script:TrustedSignerThumbprint)) {
-        Write-UpdateLog 'Thumbprint de assinante confiável configurado e será validado.' 'OK'
-    }
 }
 
 function Parse-VersionStrict {
@@ -504,20 +459,18 @@ function Test-DownloadedScriptSignature {
         throw 'O arquivo informou assinatura válida, mas nenhum certificado de assinante foi disponibilizado pelo sistema.'
     }
 
-    $subject = [string]$signature.SignerCertificate.Subject
-    $thumbprint = ([string]$signature.SignerCertificate.Thumbprint) -replace '\s+', ''
-    $thumbprint = $thumbprint.ToUpperInvariant()
-
-    Write-UpdateLog "Assinatura Authenticode válida. Subject: $subject" 'OK'
-    Write-UpdateLog "Thumbprint do assinante: $thumbprint" 'OK'
-
-    if (-not [string]::IsNullOrWhiteSpace($script:TrustedSignerThumbprint)) {
-        if ($thumbprint -ne $script:TrustedSignerThumbprint) {
-            throw 'O certificado que assinou a atualização não corresponde ao thumbprint confiável configurado. O arquivo NÃO será instalado.'
-        }
-
-        Write-UpdateLog 'Thumbprint do assinante corresponde ao certificado confiável configurado.' 'OK'
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $signerHash = [BitConverter]::ToString($sha256.ComputeHash($signature.SignerCertificate.RawData)).Replace('-', '')
     }
+    finally {
+        $sha256.Dispose()
+    }
+
+    if ($signerHash -ne $script:ExpectedSignerSha256) {
+        throw 'O certificado que assinou a atualização não corresponde ao assinante oficial.'
+    }
+    Write-UpdateLog "Assinatura Authenticode oficial validada para $($signature.SignerCertificate.Subject)." 'OK'
 }
 
 function Test-PowerShellScriptSyntax {
@@ -604,8 +557,7 @@ function Replace-InstalledScript {
     Write-Section '7. Aplicando atualização'
 
     try {
-        # Stage no mesmo volume da instalação para permitir File.Replace.
-        # File.Replace cria o backup original durante a própria substituição.
+        # Stage and backup are on the same volume as the installed script.
         Copy-Item -LiteralPath $script:DownloadedPath -Destination $script:StagedPath -Force -ErrorAction Stop
 
         $stagedHash = (Get-FileHash -LiteralPath $script:StagedPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -617,7 +569,18 @@ function Replace-InstalledScript {
             throw 'O arquivo em staging ultrapassa o limite de tamanho de segurança.'
         }
 
-        [IO.File]::Replace($script:StagedPath, $script:InstalledScriptPath, $script:BackupPath, $true)
+        $currentHash = Get-InstalledScriptHash
+        if ($currentHash -ne $script:OriginalHash) {
+            throw 'O script instalado mudou após a confirmação. Execute o atualizador novamente.'
+        }
+        Copy-Item -LiteralPath $script:InstalledScriptPath -Destination $script:BackupPath
+        $backupHash = (Get-FileHash -LiteralPath $script:BackupPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($backupHash -ne $script:OriginalHash) {
+            throw 'O backup não corresponde ao script original.'
+        }
+
+        $script:RollbackNeeded = $true
+        [IO.File]::Replace($script:StagedPath, $script:InstalledScriptPath, [NullString]::Value, $true)
         Write-UpdateLog 'ClipSqueeze.ps1 substituído usando File.Replace.' 'OK'
     }
     catch {
@@ -633,16 +596,6 @@ function Replace-InstalledScript {
         throw 'O SHA-256 do script instalado após a substituição não corresponde ao arquivo validado.'
     }
 
-    if (-not (Test-Path -LiteralPath $script:BackupPath -PathType Leaf)) {
-        throw 'File.Replace não criou o backup necessário para rollback. Atualização recusada.'
-    }
-
-    $backupHash = (Get-FileHash -LiteralPath $script:BackupPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($backupHash -ne $script:OriginalHash) {
-        throw 'O backup criado por File.Replace não corresponde ao script original.'
-    }
-
-    $script:RollbackNeeded = $true
     Write-UpdateLog 'Integridade do arquivo atualizado e do backup de rollback confirmadas.' 'OK'
 }
 
@@ -653,17 +606,26 @@ function Restore-PreviousScript {
     }
 
     try {
-        Copy-Item -LiteralPath $script:BackupPath -Destination $script:InstalledScriptPath -Force -ErrorAction Stop
-        $restoredHash = (Get-FileHash -LiteralPath $script:InstalledScriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($restoredHash -ne $script:OriginalHash) {
-            Write-UpdateLog 'O rollback foi executado, mas o SHA-256 restaurado não corresponde ao original.' 'ERROR'
+        $backupHash = (Get-FileHash -LiteralPath $script:BackupPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($backupHash -ne $script:OriginalHash) {
+            throw 'O SHA-256 do backup não corresponde ao original.'
+        }
+        Copy-Item -LiteralPath $script:BackupPath -Destination $script:StagedPath -Force
+        if (Test-Path -LiteralPath $script:InstalledScriptPath -PathType Leaf) {
+            [IO.File]::Replace($script:StagedPath, $script:InstalledScriptPath, [NullString]::Value, $true)
         }
         else {
-            Write-UpdateLog 'Versão anterior do ClipSqueeze.ps1 restaurada com sucesso.' 'OK'
+            [IO.File]::Move($script:StagedPath, $script:InstalledScriptPath)
         }
+        if ((Get-InstalledScriptHash) -ne $script:OriginalHash) {
+            throw 'O SHA-256 restaurado não corresponde ao original.'
+        }
+        $script:RollbackNeeded = $false
+        Cleanup-Backup
+        Write-UpdateLog 'Versão anterior do ClipSqueeze.ps1 restaurada com sucesso.' 'OK'
     }
     catch {
-        Write-UpdateLog "Falha crítica ao restaurar a versão anterior: $($_.Exception.Message)" 'ERROR'
+        Write-UpdateLog "Falha crítica ao restaurar a versão anterior. Backup: $script:BackupPath. $($_.Exception.Message)" 'ERROR'
     }
 }
 
@@ -687,14 +649,20 @@ function Write-JsonAtomic {
             $backup = Join-Path $directory ('.clipsqueeze-json-backup-' + [guid]::NewGuid().ToString('N') + '.bak')
             try {
                 Copy-Item -LiteralPath $Path -Destination $backup -Force
-                [IO.File]::Replace($temp, $Path, $backup, $true)
-                Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+                [IO.File]::Replace($temp, $Path, [NullString]::Value, $true)
             }
             catch {
-                Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
-                Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $backup -PathType Leaf) {
+                    $original = Get-FileHash -LiteralPath $backup
+                    $current = Get-FileHash -LiteralPath $Path -ErrorAction SilentlyContinue
+                    if ($null -eq $current -or $current.Hash -ne $original.Hash) {
+                        Copy-Item -LiteralPath $backup -Destination $Path -Force
+                    }
+                    Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+                }
                 throw
             }
+            Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
         }
         else {
             Move-Item -LiteralPath $temp -Destination $Path -Force
@@ -735,25 +703,28 @@ function Update-InstallationState {
 
     $files.clipSqueezeSha256 = $script:NewHash
     $script:State.applicationVersion = $script:LatestVersion.ToString()
-    $script:State.updatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+    $updatedAt = (Get-Date).ToUniversalTime().ToString('o')
+    $script:State = Set-OrAddObjectProperty -Object $script:State -Name 'updatedAtUtc' -Value $updatedAt
 
     $updates = Get-OptionalProperty -Object $script:State -Name 'updates'
     if ($null -eq $updates) {
         $updates = [pscustomobject]@{}
-        $script:State | Add-Member -NotePropertyName updates -NotePropertyValue $updates
+        $script:State = Set-OrAddObjectProperty -Object $script:State -Name 'updates' -Value $updates
     }
 
     $updates = Set-OrAddObjectProperty -Object $updates -Name 'lastReleaseTag' -Value "v$($script:LatestVersion)"
-    $updates = Set-OrAddObjectProperty -Object $updates -Name 'lastUpdateAtUtc' -Value ((Get-Date).ToUniversalTime().ToString('o'))
+    $updates = Set-OrAddObjectProperty -Object $updates -Name 'lastUpdateAtUtc' -Value $updatedAt
     $updates = Set-OrAddObjectProperty -Object $updates -Name 'lastAssetSha256' -Value $script:NewHash
     $updates = Set-OrAddObjectProperty -Object $updates -Name 'repository' -Value $script:RepositoryResolved
 
     Write-JsonAtomic -Path $script:StatePath -Object $script:State
+    $script:UpdateApplied = $true
+    $script:RollbackNeeded = $false
 
     # config.json é opcional. Se existir e for válido, apenas applicationVersion é atualizado.
     if ($null -ne $script:Config) {
         try {
-            $script:Config.applicationVersion = $script:LatestVersion.ToString()
+            $script:Config = Set-OrAddObjectProperty -Object $script:Config -Name 'applicationVersion' -Value $script:LatestVersion.ToString()
             Write-JsonAtomic -Path $script:ConfigPath -Object $script:Config
             Write-UpdateLog 'applicationVersion do config.json atualizado.' 'OK'
         }
@@ -811,12 +782,10 @@ function Cleanup-TemporaryFiles {
 }
 
 function Cleanup-Backup {
-    if (-not $script:RollbackNeeded) { return }
-
     try {
         if (Test-Path -LiteralPath $script:BackupPath) {
             Remove-Item -LiteralPath $script:BackupPath -Force -ErrorAction Stop
-            Write-UpdateLog 'Backup temporário removido após validação bem-sucedida.' 'OK'
+            Write-UpdateLog 'Backup temporário removido.' 'OK'
         }
     }
     catch {
@@ -857,10 +826,11 @@ function Invoke-Update {
 
     Test-RunningOnWindows
     Test-PowerShellVersion
-    Set-TlsSecurity
     Assert-SafeInstallRoot
 
     $script:State = Read-InstallationState
+    $script:InstallRootValidated = $true
+    Set-TlsSecurity
     $script:Config = Read-ConfigIfPresent
     Resolve-UpdateConfiguration
 
@@ -885,20 +855,8 @@ function Invoke-Update {
     }
 
     Replace-InstalledScript
-
-    try {
-        # Primeiro valida o novo script. O estado só é alterado depois de o arquivo estar validado.
-        Test-InstalledScriptAfterUpdate
-        Update-InstallationState
-        $script:UpdateApplied = $true
-        $script:RollbackNeeded = $false
-    }
-    catch {
-        Write-UpdateLog 'Falha após substituição. Iniciando rollback para a versão anterior.' 'ERROR'
-        Restore-PreviousScript
-        throw
-    }
-
+    Test-InstalledScriptAfterUpdate
+    Update-InstallationState
     Cleanup-Backup
 
     Write-Host ''
@@ -927,7 +885,6 @@ catch {
     }
 
     Show-UpdateNotification -Title 'ClipSqueeze — Atualização' -Message 'Não foi possível concluir a atualização. Consulte update.log para obter detalhes.' -Type Error
-    Cleanup-TemporaryFiles
     exit 1
 }
 finally {

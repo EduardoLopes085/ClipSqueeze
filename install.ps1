@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#!
 .SYNOPSIS
     Instala e configura o ClipSqueeze para o usuário atual.
@@ -44,14 +44,18 @@ $script:SourceScriptPath = Join-Path $PSScriptRoot 'ClipSqueeze.ps1'
 $script:ProfilePath = $PROFILE
 $script:ProfileWasCreatedByInstaller = $false
 $script:ProfileWasModifiedByInstaller = $false
+$script:ProfileDirectoryCreated = $false
 $script:ExecutionPolicyChangedByInstaller = $false
 $script:PreviousCurrentUserExecutionPolicy = $null
 $script:FfmpegInstalledByInstaller = $false
 $script:InstallStarted = $false
 $script:InstallCompleted = $false
-$script:ExistingManagedInstallation = $false
-$script:BackupScriptPath = Join-Path $env:TEMP ("ClipSqueeze-Backup-{0}.ps1" -f ([guid]::NewGuid().ToString('N')))
-$script:BackupConfigPath = Join-Path $env:TEMP ("ClipSqueeze-Backup-{0}.json" -f ([guid]::NewGuid().ToString('N')))
+$script:ExistingState = $null
+$script:InstallRootCreated = $false
+$script:LogDirectoryCreated = $false
+$script:InstallationSnapshot = @()
+$script:InstallationFilesMayHaveChanged = $false
+$script:BackupProfilePath = Join-Path $env:TEMP ("ClipSqueeze-Profile-{0}.bak" -f ([guid]::NewGuid().ToString('N')))
 
 function Write-InstallLog {
     param(
@@ -234,20 +238,31 @@ function Assert-SafeInstallDirectory {
 
     switch ($status) {
         'Missing' {
-            New-Item -ItemType Directory -Path $script:InstallRoot -Force | Out-Null
+            New-Item -ItemType Directory -Path $script:InstallRoot | Out-Null
+            $script:InstallRootCreated = $true
             Write-InstallLog "Diretório criado: $script:InstallRoot" 'OK'
         }
         'Empty' {
             Write-InstallLog "Diretório de instalação já existe e está vazio: $script:InstallRoot" 'OK'
         }
         'Managed' {
-            $script:ExistingManagedInstallation = $true
-            $raw = Get-Content -LiteralPath $script:StatePath -Raw -ErrorAction Stop
+            $raw = Get-Content -LiteralPath $script:StatePath -Raw -Encoding UTF8
             $state = $raw | ConvertFrom-Json -ErrorAction Stop
 
             if ($state.InstallRoot -ne $script:InstallRoot) {
                 throw 'O estado da instalação aponta para um diretório diferente. Operação abortada para evitar exclusão ou sobrescrita inesperada.'
             }
+            $registeredProfile = [string]$state.profile.path
+            if ($registeredProfile -ne $script:ProfilePath) {
+                $documents = [Environment]::GetFolderPath('MyDocuments')
+                $profileRoots = @((Join-Path $documents 'PowerShell'), (Join-Path $documents 'WindowsPowerShell'))
+                $profileNames = @('Profile.ps1', 'Microsoft.PowerShell_profile.ps1', 'Microsoft.VSCode_profile.ps1', 'Microsoft.PowerShellISE_profile.ps1')
+                if ((Split-Path $registeredProfile -Parent) -notin $profileRoots -or (Split-Path $registeredProfile -Leaf) -notin $profileNames) {
+                    throw "Profile registrado fora dos caminhos conhecidos: $registeredProfile"
+                }
+                $script:ProfilePath = $registeredProfile
+            }
+            $script:ExistingState = $state
 
             Write-InstallLog 'Instalação existente do ClipSqueeze detectada. Será executado um reparo/atualização idempotente.' 'WARN'
         }
@@ -287,7 +302,7 @@ function Get-TextEncoding {
 function Write-TextPreservingEncoding {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Content,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Content,
         [System.Text.Encoding]$Encoding
     )
 
@@ -304,7 +319,7 @@ function Write-TextPreservingEncoding {
 
         if (Test-Path -LiteralPath $Path -PathType Leaf) {
             try {
-                [IO.File]::Replace($tempPath, $Path, $null)
+                [IO.File]::Replace($tempPath, $Path, [NullString]::Value)
             }
             catch {
                 Move-Item -LiteralPath $tempPath -Destination $Path -Force
@@ -329,45 +344,48 @@ function Get-ClipSqueezeProfileBlock {
     ) -join "`r`n"
 }
 
-function Backup-ExistingInstallationFiles {
-    if (-not $script:ExistingManagedInstallation) {
-        return
-    }
+function Get-ClipSqueezeProfileBlockPattern {
+    return '(?ms)^# >>> ClipSqueeze >>>\r?\n.*?\r?\n# <<< ClipSqueeze <<<(?=\r?$)'
+}
 
-    if (Test-Path -LiteralPath $script:InstalledScriptPath -PathType Leaf) {
-        Copy-Item -LiteralPath $script:InstalledScriptPath -Destination $script:BackupScriptPath -Force
-        Write-InstallLog 'Backup temporário do ClipSqueeze.ps1 existente criado para permitir rollback.'
-    }
-
-    if (Test-Path -LiteralPath $script:ConfigPath -PathType Leaf) {
-        Copy-Item -LiteralPath $script:ConfigPath -Destination $script:BackupConfigPath -Force
-        Write-InstallLog 'Backup temporário do config.json existente criado para permitir rollback.'
+function Backup-InstallationFiles {
+    foreach ($path in @($script:InstalledScriptPath, $script:ConfigPath, $script:StatePath)) {
+        $backup = $null
+        if (Test-Path -LiteralPath $path) {
+            $item = Get-Item -LiteralPath $path -Force
+            if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw "Caminho de instalação inesperado: $path"
+            }
+            $backup = Join-Path $env:TEMP ("ClipSqueeze-Backup-{0}.bak" -f [guid]::NewGuid().ToString('N'))
+        }
+        $script:InstallationSnapshot += @{ Path = $path; Backup = $backup }
+        if ($backup) { Copy-Item -LiteralPath $path -Destination $backup }
     }
 }
 
-function Restore-ExistingInstallationFiles {
-    if (-not $script:ExistingManagedInstallation) {
-        return
-    }
-
-    try {
-        if (Test-Path -LiteralPath $script:BackupScriptPath -PathType Leaf) {
-            Copy-Item -LiteralPath $script:BackupScriptPath -Destination $script:InstalledScriptPath -Force
-            Write-InstallLog 'ClipSqueeze.ps1 existente restaurado após falha.' 'OK'
+function Restore-InstallationFiles {
+    $restored = $true
+    foreach ($entry in $script:InstallationSnapshot) {
+        try {
+            if ($entry.Backup) {
+                Copy-Item -LiteralPath $entry.Backup -Destination $entry.Path -Force
+            }
+            elseif (Test-Path -LiteralPath $entry.Path -PathType Leaf) {
+                Remove-Item -LiteralPath $entry.Path -Force
+            }
         }
-
-        if (Test-Path -LiteralPath $script:BackupConfigPath -PathType Leaf) {
-            Copy-Item -LiteralPath $script:BackupConfigPath -Destination $script:ConfigPath -Force
-            Write-InstallLog 'config.json existente restaurado após falha.' 'OK'
+        catch {
+            $restored = $false
+            Write-InstallLog "Falha ao restaurar '$($entry.Path)'. Backup: '$($entry.Backup)'. $($_.Exception.Message)" 'ERROR'
         }
     }
-    catch {
-        Write-InstallLog "Falha ao restaurar arquivos da instalação anterior: $($_.Exception.Message)" 'ERROR'
-    }
+    return $restored
 }
 
 function Remove-TemporaryBackups {
-    Remove-Item -LiteralPath $script:BackupScriptPath, $script:BackupConfigPath -Force -ErrorAction SilentlyContinue
+    foreach ($entry in $script:InstallationSnapshot) {
+        if ($entry.Backup) { Remove-Item -LiteralPath $entry.Backup -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 function Update-PowerShellProfile {
@@ -379,28 +397,33 @@ function Update-PowerShellProfile {
 
     $profileDirectory = Split-Path -Path $script:ProfilePath -Parent
     if (-not (Test-Path -LiteralPath $profileDirectory)) {
-        New-Item -ItemType Directory -Path $profileDirectory -Force | Out-Null
+        New-Item -ItemType Directory -Path $profileDirectory | Out-Null
+        $script:ProfileDirectoryCreated = $true
     }
 
     $profileExisted = Test-Path -LiteralPath $script:ProfilePath -PathType Leaf
-    $content = if ($profileExisted) { Get-Content -LiteralPath $script:ProfilePath -Raw } else { '' }
+    if ($profileExisted -and ((Get-Item -LiteralPath $script:ProfilePath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Profile é um reparse point/symlink: $script:ProfilePath"
+    }
     $encoding = if ($profileExisted) { Get-TextEncoding -Path $script:ProfilePath } else { New-Object System.Text.UTF8Encoding($false) }
+    $content = if ($profileExisted) { [IO.File]::ReadAllText($script:ProfilePath, $encoding) } else { '' }
 
     $block = Get-ClipSqueezeProfileBlock
-    $pattern = '(?ms)^# >>> ClipSqueeze >>>\r?\n.*?\r?\n# <<< ClipSqueeze <<<$'
+    $pattern = Get-ClipSqueezeProfileBlockPattern
 
     if ($content -match $pattern) {
         $newContent = [regex]::Replace($content, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $block })
     }
     else {
-        $separator = if ([string]::IsNullOrWhiteSpace($content)) { '' } elseif ($content.EndsWith("`r`n")) { '' } elseif ($content.EndsWith("`n")) { "`r" } else { "`r`n" }
+        $separator = if ($content.Length -eq 0 -or $content.EndsWith("`n")) { '' } else { "`r`n" }
         $newContent = $content + $separator + $block + "`r`n"
     }
 
     if ($newContent -ne $content) {
-        Write-TextPreservingEncoding -Path $script:ProfilePath -Content $newContent -Encoding $encoding
-        $script:ProfileWasModifiedByInstaller = $true
+        if ($profileExisted) { Copy-Item -LiteralPath $script:ProfilePath -Destination $script:BackupProfilePath }
         $script:ProfileWasCreatedByInstaller = -not $profileExisted
+        $script:ProfileWasModifiedByInstaller = $true
+        Write-TextPreservingEncoding -Path $script:ProfilePath -Content $newContent -Encoding $encoding
         Write-InstallLog "Profile configurado: $script:ProfilePath" 'OK'
     }
     else {
@@ -437,7 +460,7 @@ function Initialize-Config {
 
     if (Test-Path -LiteralPath $script:ConfigPath -PathType Leaf) {
         try {
-            $existing = Get-Content -LiteralPath $script:ConfigPath -Raw | ConvertFrom-Json -ErrorAction Stop
+            $existing = Get-Content -LiteralPath $script:ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
             if ($null -eq $existing) { throw 'config.json vazio.' }
             Write-InstallLog 'config.json já existe e será preservado.' 'OK'
             return
@@ -638,7 +661,7 @@ function Invoke-FfmpegDiagnostics {
 function New-InstallationState {
     $hash = (Get-FileHash -LiteralPath $script:InstalledScriptPath -Algorithm SHA256).Hash
 
-    return [ordered]@{
+    $state = [ordered]@{
         schemaVersion = 1
         installerVersion = $script:InstallerVersion
         applicationVersion = $script:ApplicationVersion
@@ -650,6 +673,7 @@ function New-InstallationState {
             path = $script:ProfilePath
             blockManaged = $true
             profileWasCreatedByInstaller = $script:ProfileWasCreatedByInstaller
+            directoryWasCreatedByInstaller = $script:ProfileDirectoryCreated
         }
         executionPolicy = [ordered]@{
             changedByInstaller = $script:ExecutionPolicyChangedByInstaller
@@ -664,6 +688,19 @@ function New-InstallationState {
             clipSqueezeSha256 = $hash
         }
     }
+
+    if ($null -ne $script:ExistingState) {
+        $previous = $script:ExistingState
+        $state.installedAtUtc = $previous.installedAtUtc
+        $state.profile.profileWasCreatedByInstaller = $state.profile.profileWasCreatedByInstaller -or $previous.profile.profileWasCreatedByInstaller
+        $previousDirectory = $previous.profile.PSObject.Properties['directoryWasCreatedByInstaller']
+        if ($previousDirectory -and $previousDirectory.Value) { $state.profile.directoryWasCreatedByInstaller = $true }
+        if (-not $script:ExecutionPolicyChangedByInstaller) { $state.executionPolicy = $previous.executionPolicy }
+        $state.ffmpeg.installedByInstaller = $state.ffmpeg.installedByInstaller -or $previous.ffmpeg.installedByInstaller
+        $previousUpdates = $previous.PSObject.Properties['updates']
+        if ($previousUpdates) { $state['updates'] = $previousUpdates.Value }
+    }
+    return $state
 }
 
 function Save-InstallationState {
@@ -677,7 +714,6 @@ function Save-InstallationState {
         throw 'Não foi possível gravar install-state.json.'
     }
 
-    New-Item -ItemType Directory -Path $script:LogDirectory -Force | Out-Null
     Write-InstallLog 'Estado da instalação registrado.' 'OK'
 }
 
@@ -701,7 +737,7 @@ function Test-Installation {
     }
 
     $profileContent = Get-Content -LiteralPath $script:ProfilePath -Raw
-    if ($profileContent -notmatch '(?ms)^# >>> ClipSqueeze >>>\r?\n.*?\r?\n# <<< ClipSqueeze <<<$') {
+    if ($profileContent -notmatch (Get-ClipSqueezeProfileBlockPattern)) {
         throw 'Bloco do ClipSqueeze não foi encontrado no Profile.'
     }
 
@@ -723,31 +759,28 @@ function Invoke-Rollback {
     Write-InstallLog 'Uma etapa falhou. Tentando desfazer somente as alterações feitas pelo instalador.' 'WARN'
 
     try {
-        if ($script:ProfileWasModifiedByInstaller -and (Test-Path -LiteralPath $script:ProfilePath -PathType Leaf)) {
-            $content = Get-Content -LiteralPath $script:ProfilePath -Raw
-            $pattern = '(?ms)^# >>> ClipSqueeze >>>\r?\n.*?\r?\n# <<< ClipSqueeze <<<$'
-            $newContent = [regex]::Replace($content, $pattern, '')
-            $newContent = $newContent -replace '(?m)\r?\n\r?\n\r?\n+$', "`r`n"
-
-            if ($script:ProfileWasCreatedByInstaller -and [string]::IsNullOrWhiteSpace($newContent)) {
-                Remove-Item -LiteralPath $script:ProfilePath -Force -ErrorAction SilentlyContinue
-                $profileDirectory = Split-Path -Path $script:ProfilePath -Parent
-                if (Test-Path -LiteralPath $profileDirectory) {
-                    $entries = @(Get-ChildItem -LiteralPath $profileDirectory -Force -ErrorAction SilentlyContinue)
-                    if ($entries.Count -eq 0) {
-                        Remove-Item -LiteralPath $profileDirectory -Force -ErrorAction SilentlyContinue
-                    }
+        if ($script:ProfileWasModifiedByInstaller) {
+            if ($script:ProfileWasCreatedByInstaller) {
+                if (Test-Path -LiteralPath $script:ProfilePath -PathType Leaf) {
+                    Remove-Item -LiteralPath $script:ProfilePath -Force
                 }
             }
             else {
-                Write-TextPreservingEncoding -Path $script:ProfilePath -Content $newContent -Encoding (Get-TextEncoding -Path $script:ProfilePath)
+                Copy-Item -LiteralPath $script:BackupProfilePath -Destination $script:ProfilePath -Force
+                Remove-Item -LiteralPath $script:BackupProfilePath -Force
             }
 
             Write-InstallLog 'Integração do Profile revertida.' 'OK'
         }
+        if ($script:ProfileDirectoryCreated) {
+            $profileDirectory = Split-Path -Path $script:ProfilePath -Parent
+            if (@(Get-ChildItem -LiteralPath $profileDirectory -Force).Count -eq 0) {
+                [IO.Directory]::Delete($profileDirectory)
+            }
+        }
     }
     catch {
-        Write-InstallLog "Falha ao reverter o Profile: $($_.Exception.Message)" 'ERROR'
+        Write-InstallLog "Falha ao reverter o Profile. Backup: $script:BackupProfilePath. $($_.Exception.Message)" 'ERROR'
     }
 
     try {
@@ -785,19 +818,16 @@ function Invoke-Rollback {
         }
     }
 
-    if ($script:ExistingManagedInstallation) {
-        Restore-ExistingInstallationFiles
+    if (-not $script:InstallationFilesMayHaveChanged -or (Restore-InstallationFiles)) {
         Remove-TemporaryBackups
-        return
     }
 
     try {
-        if (Test-Path -LiteralPath $script:InstallRoot) {
-            $item = Get-Item -LiteralPath $script:InstallRoot -Force
-            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
-                Remove-Item -LiteralPath $script:InstallRoot -Recurse -Force -ErrorAction Stop
-                Write-InstallLog 'Diretório do ClipSqueeze removido durante rollback.' 'OK'
-            }
+        if ($script:LogDirectoryCreated -and @(Get-ChildItem -LiteralPath $script:LogDirectory -Force).Count -eq 0) {
+            [IO.Directory]::Delete($script:LogDirectory)
+        }
+        if ($script:InstallRootCreated -and @(Get-ChildItem -LiteralPath $script:InstallRoot -Force).Count -eq 0) {
+            [IO.Directory]::Delete($script:InstallRoot)
         }
     }
     catch {
@@ -817,10 +847,11 @@ function Invoke-Install {
 
     $script:InstallStarted = $true
 
-    Ensure-ExecutionPolicy
     Assert-SafeInstallDirectory
-    Backup-ExistingInstallationFiles
+    Backup-InstallationFiles
+    Ensure-ExecutionPolicy
 
+    $script:InstallationFilesMayHaveChanged = $true
     Copy-Item -LiteralPath $script:SourceScriptPath -Destination $script:InstalledScriptPath -Force
     Write-InstallLog "ClipSqueeze.ps1 instalado em $script:InstalledScriptPath" 'OK'
 
@@ -829,17 +860,26 @@ function Invoke-Install {
     Install-FfmpegIfNeeded
     Invoke-FfmpegDiagnostics
 
-    New-Item -ItemType Directory -Path $script:LogDirectory -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $script:LogDirectory -PathType Container)) {
+        New-Item -ItemType Directory -Path $script:LogDirectory | Out-Null
+        $script:LogDirectoryCreated = $true
+    }
     Save-InstallationState
     Test-Installation
+    $script:InstallCompleted = $true
 
     if (Test-Path -LiteralPath $script:TempLogPath) {
-        Copy-Item -LiteralPath $script:TempLogPath -Destination (Join-Path $script:LogDirectory 'install.log') -Force
-        Remove-Item -LiteralPath $script:TempLogPath -Force -ErrorAction SilentlyContinue
+        try {
+            Copy-Item -LiteralPath $script:TempLogPath -Destination (Join-Path $script:LogDirectory 'install.log') -Force
+            Remove-Item -LiteralPath $script:TempLogPath -Force -ErrorAction SilentlyContinue
+        }
+        catch {
+            Write-InstallLog "Não foi possível copiar o log de instalação: $($_.Exception.Message)" 'WARN'
+        }
     }
 
     Remove-TemporaryBackups
-    $script:InstallCompleted = $true
+    Remove-Item -LiteralPath $script:BackupProfilePath -Force -ErrorAction SilentlyContinue
 
     Write-Host ''
     Write-Host ('=' * 68) -ForegroundColor Green
@@ -873,9 +913,4 @@ catch {
     }
 
     exit 1
-}
-finally {
-    if (Test-Path -LiteralPath $script:TempLogPath -and $script:InstallCompleted) {
-        Remove-Item -LiteralPath $script:TempLogPath -Force -ErrorAction SilentlyContinue
-    }
 }

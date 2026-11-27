@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#!
 .SYNOPSIS
     Remove completamente a instalação do ClipSqueeze pertencente ao usuário atual.
@@ -103,7 +103,7 @@ function Get-TextEncoding {
 function Write-TextPreservingEncoding {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Content,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Content,
         [System.Text.Encoding]$Encoding
     )
 
@@ -115,7 +115,7 @@ function Write-TextPreservingEncoding {
         [IO.File]::WriteAllText($tempPath, $Content, $targetEncoding)
 
         try {
-            [IO.File]::Replace($tempPath, $Path, $null)
+            [IO.File]::Replace($tempPath, $Path, [NullString]::Value)
         }
         catch {
             Move-Item -LiteralPath $tempPath -Destination $Path -Force
@@ -159,7 +159,7 @@ function Assert-SafeInstallRoot {
 }
 
 function Read-InstallationState {
-    $raw = Get-Content -LiteralPath $script:StatePath -Raw -ErrorAction Stop
+    $raw = Get-Content -LiteralPath $script:StatePath -Raw -Encoding UTF8 -ErrorAction Stop
     $state = $raw | ConvertFrom-Json -ErrorAction Stop
 
     foreach ($property in @('installRoot', 'mainScript', 'profile', 'executionPolicy', 'ffmpeg')) {
@@ -192,7 +192,7 @@ function Read-InstallationState {
 }
 
 function Get-ClipSqueezeProfileBlockPattern {
-    return '(?ms)^# >>> ClipSqueeze >>>\r?\n.*?\r?\n# <<< ClipSqueeze <<<$'
+    return '(?ms)^# >>> ClipSqueeze >>>\r?\n.*?\r?\n# <<< ClipSqueeze <<<(?:\r?\n|\z)'
 }
 
 
@@ -224,7 +224,7 @@ function Assert-SafeProfilePath {
     }
 
     $leaf = [IO.Path]::GetFileName($fullPath)
-    if ($leaf -notin @('Profile.ps1', 'Microsoft.PowerShell_profile.ps1')) {
+    if ($leaf -notin @('Profile.ps1', 'Microsoft.PowerShell_profile.ps1', 'Microsoft.VSCode_profile.ps1', 'Microsoft.PowerShellISE_profile.ps1')) {
         throw "O nome do Profile registrado não é reconhecido como um Profile padrão do PowerShell: $leaf"
     }
 
@@ -251,8 +251,8 @@ function Remove-ProfileIntegration {
         return
     }
 
-    $content = Get-Content -LiteralPath $profilePath -Raw
     $encoding = Get-TextEncoding -Path $profilePath
+    $content = [IO.File]::ReadAllText($profilePath, $encoding)
     $pattern = Get-ClipSqueezeProfileBlockPattern
 
     if ($content -notmatch $pattern) {
@@ -270,20 +270,16 @@ function Remove-ProfileIntegration {
         $newContent = [regex]::Replace($content, $pattern, '')
     }
 
-    $newContent = $newContent -replace '(?m)\r?\n\r?\n\r?\n+$', "`r`n"
-
     $createdByInstaller = [bool]$script:State.profile.profileWasCreatedByInstaller
     if ($createdByInstaller -and [string]::IsNullOrWhiteSpace($newContent)) {
         Remove-Item -LiteralPath $profilePath -Force
         Write-UninstallLog "Profile criado pelo instalador e agora vazio: arquivo removido ($profilePath)." 'OK'
 
         $profileDirectory = Split-Path -Path $profilePath -Parent
-        if (Test-Path -LiteralPath $profileDirectory) {
-            $entries = @(Get-ChildItem -LiteralPath $profileDirectory -Force -ErrorAction SilentlyContinue)
-            if ($entries.Count -eq 0) {
-                Remove-Item -LiteralPath $profileDirectory -Force -ErrorAction SilentlyContinue
-                Write-UninstallLog "Diretório de Profile criado pelo instalador e vazio removido: $profileDirectory" 'OK'
-            }
+        $directoryOwner = $script:State.profile.PSObject.Properties['directoryWasCreatedByInstaller']
+        if ($directoryOwner -and $directoryOwner.Value -and @(Get-ChildItem -LiteralPath $profileDirectory -Force).Count -eq 0) {
+            [IO.Directory]::Delete($profileDirectory)
+            Write-UninstallLog "Diretório de Profile criado pelo instalador e vazio removido: $profileDirectory" 'OK'
         }
     }
     else {
@@ -362,9 +358,15 @@ function Remove-FfmpegIfOwned {
     }
 
     Write-UninstallLog "Removendo $packageId via WinGet..."
+    $PSNativeCommandUseErrorActionPreference = $false
     & $winget uninstall --id $packageId -e --accept-source-agreements
     $exitCode = $LASTEXITCODE
 
+    # WinGet: APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND.
+    if ($exitCode -eq -1978335212) {
+        Write-UninstallLog "$packageId já não está instalado." 'OK'
+        return
+    }
     if ($exitCode -ne 0) {
         throw "WinGet falhou ao remover $packageId. Código de saída: $exitCode"
     }
@@ -455,9 +457,9 @@ function Invoke-Uninstall {
     Test-RootForReparsePoints
     Confirm-Uninstall
 
+    Remove-FfmpegIfOwned
     Remove-ProfileIntegration
     Restore-ExecutionPolicy
-    Remove-FfmpegIfOwned
     Remove-InstallDirectory
 
     Write-Host ''

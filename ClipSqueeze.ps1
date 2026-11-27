@@ -39,6 +39,11 @@ function ConvertTo-HashtableDeep {
 
     if ($null -eq $InputObject) { return $null }
 
+    # PowerShell 7 represents JSON integers as Int64, even when they fit in Int32.
+    if ($InputObject -is [long] -and $InputObject -ge [int]::MinValue -and $InputObject -le [int]::MaxValue) {
+        return [int]$InputObject
+    }
+
     if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) {
         $lista = @()
         foreach ($item in $InputObject) {
@@ -99,6 +104,10 @@ function Repair-ParametrosPerfil {
         nvidia = @{}
     }
 
+    $cpuPresets = @('ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow', 'placebo')
+    $amdQualities = @('speed', 'balanced', 'quality', 'high_quality')
+    $nvidiaPresets = @('default', 'slow', 'medium', 'fast', 'hp', 'hq', 'bd', 'll', 'llhq', 'llhp', 'lossless', 'losslesshp', 'p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7')
+
     foreach ($acelerador in @("cpu", "amd", "nvidia")) {
         $origem = $Config.profileOverrides[$acelerador]
         if ($origem -isnot [hashtable]) { continue }
@@ -109,10 +118,13 @@ function Repair-ParametrosPerfil {
                 if ($perfilConfig -isnot [hashtable]) { continue }
 
                 $filtrado = @{}
-                foreach ($chave in @("preset", "crf")) {
-                    if ($perfilConfig.ContainsKey($chave)) {
-                        $filtrado[$chave] = $perfilConfig[$chave]
-                    }
+                $preset = $perfilConfig['preset']
+                $crf = $perfilConfig['crf']
+                if ($preset -is [string] -and $preset -in $cpuPresets) {
+                    $filtrado.preset = $preset.ToLowerInvariant()
+                }
+                if (($crf -is [int] -or $crf -is [double] -or $crf -is [decimal]) -and $crf -ge 0 -and $crf -le 51) {
+                    $filtrado.crf = $crf
                 }
                 if ($filtrado.Count -gt 0) {
                     $resultado.cpu[$perfil] = $filtrado
@@ -124,27 +136,37 @@ function Repair-ParametrosPerfil {
                 $codecConfig = $origem[$codec]
                 if ($codecConfig -isnot [hashtable]) { continue }
 
+                $perfisCodec = @{}
                 foreach ($perfil in @("fast", "balanced", "efficient", "quality")) {
                     $perfilConfig = $codecConfig[$perfil]
                     if ($perfilConfig -isnot [hashtable]) { continue }
 
-                    $permitidos = if ($acelerador -eq "amd") {
-                        @("quality", "qvbr")
+                    $filtrado = @{}
+                    if ($acelerador -eq "amd") {
+                        $quality = $perfilConfig['quality']
+                        $qvbr = $perfilConfig['qvbr']
+                        if ($quality -is [string] -and $quality -in $amdQualities) {
+                            $filtrado.quality = $quality.ToLowerInvariant()
+                        }
+                        if ($qvbr -is [int] -and $qvbr -ge -1 -and $qvbr -le 51) {
+                            $filtrado.qvbr = $qvbr
+                        }
                     }
                     else {
-                        @("preset", "cq")
-                    }
-
-                    $filtrado = @{}
-                    foreach ($chave in $permitidos) {
-                        if ($perfilConfig.ContainsKey($chave)) {
-                            $filtrado[$chave] = $perfilConfig[$chave]
+                        $preset = $perfilConfig['preset']
+                        $cq = $perfilConfig['cq']
+                        if ($preset -is [string] -and $preset -in $nvidiaPresets) {
+                            $filtrado.preset = $preset.ToLowerInvariant()
+                        }
+                        if (($cq -is [int] -or $cq -is [double] -or $cq -is [decimal]) -and $cq -ge 0 -and $cq -le 51) {
+                            $filtrado.cq = $cq
                         }
                     }
                     if ($filtrado.Count -gt 0) {
-                        $resultado[$acelerador][$codec][$perfil] = $filtrado
+                        $perfisCodec[$perfil] = $filtrado
                     }
                 }
+                if ($perfisCodec.Count -gt 0) { $resultado[$acelerador][$codec] = $perfisCodec }
             }
         }
     }
@@ -207,8 +229,12 @@ function Repair-ClipSqueezeConfig {
         $Config.output.overwrite = $Padrao.output.overwrite
     }
 
-    if ($Config.audio.codec -isnot [string] -or [string]::IsNullOrWhiteSpace($Config.audio.codec)) {
+    $audioCodecs = @('aac', 'libfdk_aac', 'opus', 'libopus', 'mp3', 'libmp3lame', 'ac3', 'eac3', 'flac', 'alac', 'vorbis', 'libvorbis', 'pcm_s16le', 'pcm_s24le', 'pcm_s32le', 'copy')
+    if ($Config.audio.codec -isnot [string] -or $Config.audio.codec -notin $audioCodecs) {
         $Config.audio.codec = $Padrao.audio.codec
+    }
+    else {
+        $Config.audio.codec = $Config.audio.codec.ToLowerInvariant()
     }
     if ($Config.audio.bitrateKbps -isnot [int] -or $Config.audio.bitrateKbps -le 0) {
         $Config.audio.bitrateKbps = $Padrao.audio.bitrateKbps
@@ -395,8 +421,8 @@ function Resolve-ArquivoVideo {
     param([string]$arquivo)
 
     # Se o caminho já existe exatamente como foi passado (com extensão), usa direto
-    if (Test-Path $arquivo -PathType Leaf) {
-        return Get-Item $arquivo
+    if (Test-Path -LiteralPath $arquivo -PathType Leaf) {
+        return Get-Item -LiteralPath $arquivo
     }
 
     # Extensões de vídeo que vamos tentar
@@ -409,8 +435,8 @@ function Resolve-ArquivoVideo {
     $candidatos = @()
     foreach ($ext in $extensoes) {
         $tentativa = Join-Path $pasta "$nomeBase.$ext"
-        if (Test-Path $tentativa -PathType Leaf) {
-            $candidatos += Get-Item $tentativa
+        if (Test-Path -LiteralPath $tentativa -PathType Leaf) {
+            $candidatos += Get-Item -LiteralPath $tentativa
         }
     }
 
@@ -724,7 +750,7 @@ function Build-FfmpegArgs {
         $argsBase = @(
             "-hwaccel", "d3d11va",
             "-hwaccel_output_format", "d3d11",
-            "-i", "`"$entrada`"",
+            "-i", $entrada,
             "-vf", $filtroEscalaGpu
         )
 
@@ -753,16 +779,16 @@ function Build-FfmpegArgs {
             "-c:a", $audioCodec,
             "-b:a", "${audioKbps}k",
             "-y",
-            "-progress", "`"$progressFile`"",
+            "-progress", $progressFile,
             "-nostats",
-            "`"$saida`""
+            $saida
         )
     }
 
     # CPU continua usando o pipeline original.
     if ($parametros.Acelerador -eq "cpu") {
         $argsBase = @(
-            "-i", "`"$entrada`"",
+            "-i", $entrada,
             "-vf", $filtroEscalaCpu
         )
 
@@ -772,7 +798,7 @@ function Build-FfmpegArgs {
             @(
                 "-c:v", "libx265",
                 "-preset", $config.preset,
-                "-crf", $config.crf
+                "-crf", $config.crf.ToString([Globalization.CultureInfo]::InvariantCulture)
             )
         }
         else {
@@ -791,9 +817,9 @@ function Build-FfmpegArgs {
             "-c:a", $audioCodec,
             "-b:a", "${audioKbps}k",
             "-y",
-            "-progress", "`"$progressFile`"",
+            "-progress", $progressFile,
             "-nostats",
-            "`"$saida`""
+            $saida
         )
     }
 
@@ -802,7 +828,7 @@ function Build-FfmpegArgs {
     $config = $PerfisConfig.nvidia[$parametros.Codec][$parametros.Perfil]
 
     $argsBase = @(
-        "-i", "`"$entrada`"",
+        "-i", $entrada,
         "-vf", $filtroEscalaCpu
     )
 
@@ -811,7 +837,7 @@ function Build-FfmpegArgs {
             "-c:v", $encoder,
             "-preset", $config.preset,
             "-rc", "vbr",
-            "-cq", $config.cq,
+            "-cq", $config.cq.ToString([Globalization.CultureInfo]::InvariantCulture),
             "-b:v", "0"
         )
     }
@@ -832,10 +858,40 @@ function Build-FfmpegArgs {
         "-c:a", $audioCodec,
         "-b:a", "${audioKbps}k",
         "-y",
-        "-progress", "`"$progressFile`"",
+        "-progress", $progressFile,
         "-nostats",
-        "`"$saida`""
+        $saida
     )
+}
+
+function ConvertTo-WindowsArgumentLine {
+    param([string[]]$Arguments)
+
+    # Windows command-line quoting must also escape backslashes next to quotes.
+    ($Arguments | ForEach-Object {
+        '"' + ($_ -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
+    }) -join ' '
+}
+
+function Assert-ClipSqueezeOutputDirectory {
+    param([string]$Path)
+
+    for ($directory = [IO.DirectoryInfo]::new($Path); $null -ne $directory; $directory = $directory.Parent) {
+        $item = Get-Item -LiteralPath $directory.FullName -Force -ErrorAction SilentlyContinue
+        if ($item -and (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint))) {
+            throw "Pasta de saída inválida ou redirecionada: $($directory.FullName)"
+        }
+    }
+}
+
+function Get-ClipSqueezeOutputFile {
+    param([string]$Path)
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($item -and ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint))) {
+        throw "A saída não pode substituir um diretório ou link: $Path"
+    }
+    return $item
 }
 
 function Get-FpsVideo {
@@ -902,7 +958,7 @@ function Test-ArquivoSaidaValido {
     # de verdade e abrível no caminho de saída.
     param([string]$caminho)
 
-    if (-not (Test-Path $caminho -PathType Leaf) -or (Get-Item $caminho).Length -le 0) {
+    if (-not (Test-Path -LiteralPath $caminho -PathType Leaf) -or (Get-Item -LiteralPath $caminho).Length -le 0) {
         return [PSCustomObject]@{ Valido = $false; Motivo = "arquivo não existe ou está vazio" }
     }
 
@@ -966,24 +1022,34 @@ function Compress-Video {
     } else {
         $dirConfigurado
     }
-    if (-not (Test-Path $pastaSaida -PathType Container)) {
-        try {
-            New-Item -ItemType Directory -Path $pastaSaida -Force -ErrorAction Stop | Out-Null
+    try {
+        $provedor = $null
+        $unidade = $null
+        $pastaSaida = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($pastaSaida, [ref]$provedor, [ref]$unidade)
+        if ($provedor.Name -ne 'FileSystem') { throw 'A saída precisa estar no sistema de arquivos.' }
+        Assert-ClipSqueezeOutputDirectory $pastaSaida
+        [void][IO.Directory]::CreateDirectory($pastaSaida)
+        Assert-ClipSqueezeOutputDirectory $pastaSaida
+        $saida = [IO.Path]::Combine($pastaSaida, "$($nome)$($sufixoSaida).$($p.Container)")
+        if ([string]::Equals($item.FullName, $saida, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'A saída precisa ser diferente do vídeo original.'
         }
-        catch {
-            Write-Host "Não foi possível criar a pasta de saída configurada ('$pastaSaida'): $($_.Exception.Message)" -ForegroundColor Red
-            return
-        }
+        $arquivoExistente = Get-ClipSqueezeOutputFile $saida
+    }
+    catch {
+        Write-Host "Não foi possível preparar a saída: $($_.Exception.Message)" -ForegroundColor Red
+        return
     }
 
-    $saida = Join-Path $pastaSaida "$($nome)$($sufixoSaida).$($p.Container)"
-    if ((Test-Path $saida) -and -not $ClipSqueezeConfig.output.overwrite) {
+    $sobrescrever = $ClipSqueezeConfig.output.overwrite
+    if ($arquivoExistente -and -not $sobrescrever) {
         Write-Host "Já existe um arquivo comprimido: $saida" -ForegroundColor Yellow
         $resposta = Read-Host "Sobrescrever? (s/n)"
         if ($resposta -ne "s") {
             Write-Host "Cancelado."
             return
         }
+        $sobrescrever = $true
     }
 
     $duracao = Get-DuracaoVideo -caminho $item.FullName
@@ -1005,29 +1071,20 @@ function Compress-Video {
     $stdoutLog = [System.IO.Path]::GetTempFileName()
     $stderrLog = [System.IO.Path]::GetTempFileName()
 
-    $ffmpegArgs = Build-FfmpegArgs -parametros $p -entrada $item.FullName -saida $saida -progressFile $progressFile -bitrateAlvo $bitrateAlvo
-
+    $temporario = [IO.Path]::Combine($pastaSaida, ".clipsqueeze-$([guid]::NewGuid().ToString('N')).$($p.Container)")
+    $reserva = $null
     $proc = $null
     try {
-        $proc = Start-Process -FilePath "ffmpeg" -ArgumentList $ffmpegArgs -NoNewWindow -PassThru `
+        # Reserve a new file and deny deletion while FFmpeg writes to it.
+        Assert-ClipSqueezeOutputDirectory $pastaSaida
+        $reserva = [IO.File]::Open($temporario, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        $ffmpegArgs = Build-FfmpegArgs -parametros $p -entrada $item.FullName -saida $temporario -progressFile $progressFile -bitrateAlvo $bitrateAlvo
+        $linhaArgumentos = ConvertTo-WindowsArgumentLine $ffmpegArgs
+        $proc = Start-Process -FilePath "ffmpeg" -ArgumentList $linhaArgumentos -NoNewWindow -PassThru `
             -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -ErrorAction Stop
         $proc.Handle | Out-Null
-    }
-    catch {
-        Write-Host "Falha ao iniciar o ffmpeg: $($_.Exception.Message)" -ForegroundColor Red
-        Remove-Item $progressFile, $stdoutLog, $stderrLog -ErrorAction SilentlyContinue
-        return
-    }
-    if ($null -eq $proc -or $proc.Id -eq 0) {
-        Write-Host "O processo do ffmpeg não iniciou corretamente." -ForegroundColor Red
-        Remove-Item $progressFile, $stdoutLog, $stderrLog -ErrorAction SilentlyContinue
-        return
-    }
-
-    $tamanhoOriginal = $item.Length
-    $inicio = Get-Date
-
-    try {
+        $tamanhoOriginal = $item.Length
+        $inicio = Get-Date
         function Build-LinhasPainel {
             param($percent, $decorrido, $restante, $velocidade)
             $largura = $ClipSqueezeConfig.ui.progressBarWidth
@@ -1053,12 +1110,19 @@ function Compress-Video {
             )
         }
 
-        $linhasPainel = (Build-LinhasPainel -percent 0 -decorrido "" -restante "" -velocidade "").Count
-        for ($i = 0; $i -lt $linhasPainel; $i++) { Write-Host "" }
-        $topoPainel = [Console]::CursorTop - $linhasPainel
+        $consoleInterativo = -not [Console]::IsOutputRedirected
+        if ($consoleInterativo) {
+            $linhasPainel = (Build-LinhasPainel -percent 0 -decorrido "" -restante "" -velocidade "").Count
+            for ($i = 0; $i -lt $linhasPainel; $i++) { Write-Host "" }
+            $topoPainel = [Console]::CursorTop - $linhasPainel
+        }
+        else {
+            Write-Host "Comprimindo $($item.Name)..."
+        }
 
         function Desenhar-PainelComprimir {
             param($percent, $decorrido, $restante, $velocidade)
+            if (-not $consoleInterativo) { return }
             $linhas = Build-LinhasPainel -percent $percent -decorrido $decorrido -restante $restante -velocidade $velocidade
             [Console]::SetCursorPosition(0, $topoPainel)
             foreach ($linha in $linhas) {
@@ -1116,10 +1180,9 @@ function Compress-Video {
         $duracaoTotal = ((Get-Date) - $inicio).ToString("hh\:mm\:ss")
         Desenhar-PainelComprimir -percent 100 -decorrido $duracaoTotal -restante "concluído" -velocidade "--"
 
-        $arquivoGerado = (Test-Path $saida) -and ((Get-Item $saida).Length -gt 0)
         $saidaNome = Split-Path $saida -Leaf
 
-        if (-not ($proc.ExitCode -eq 0 -or $arquivoGerado)) {
+        if ($proc.ExitCode -ne 0) {
             Write-Host "`nErro na compressão (código $($proc.ExitCode))." -ForegroundColor Red
 
             $conteudoErro = Get-Content $stderrLog -Raw -ErrorAction SilentlyContinue
@@ -1135,9 +1198,14 @@ function Compress-Video {
                     New-Item -ItemType Directory -Path $pastaLog -Force -ErrorAction SilentlyContinue | Out-Null
                 }
                 $logErro = Join-Path $pastaLog "$($nome)_erro_compressao.log"
-                Copy-Item $stderrLog $logErro -ErrorAction SilentlyContinue
-                Write-Host "Log completo salvo em: $logErro" -ForegroundColor Yellow
-                $mensagemNotificacao = "${saidaNome}: falha na compressão. Veja o log em $logErro"
+                try {
+                    [IO.File]::Copy($stderrLog, $logErro, $false)
+                    Write-Host "Log completo salvo em: $logErro" -ForegroundColor Yellow
+                    $mensagemNotificacao = "${saidaNome}: falha na compressão. Veja o log em $logErro"
+                }
+                catch {
+                    Write-Host "Não foi possível salvar o log em '$logErro': $($_.Exception.Message)" -ForegroundColor Yellow
+                }
             }
 
             if ($ClipSqueezeConfig.notifications.enabled) {
@@ -1146,7 +1214,18 @@ function Compress-Video {
             return
         }
 
-        $tamanhoFinal = (Get-Item $saida).Length
+        $validacao = Test-ArquivoSaidaValido $temporario
+        if (-not $validacao.Valido) { throw "O FFmpeg gerou um vídeo inválido: $($validacao.Motivo)" }
+        $tamanhoFinal = (Get-Item -LiteralPath $temporario).Length
+        $reserva.Dispose()
+        Assert-ClipSqueezeOutputDirectory $pastaSaida
+        $destinoAtual = Get-ClipSqueezeOutputFile $saida
+        if ($sobrescrever -and $destinoAtual) {
+            [IO.File]::Replace($temporario, $saida, [NullString]::Value)
+        }
+        else {
+            [IO.File]::Move($temporario, $saida)
+        }
         $reducaoPct = [math]::Round((1 - ($tamanhoFinal / $tamanhoOriginal)) * 100, 1)
 
         Write-Host ""
@@ -1175,8 +1254,21 @@ function Compress-Video {
             Show-NotificacaoConclusao -titulo "ClipSqueeze — Concluído" -mensagem "${saidaNome}: $([math]::Round($tamanhoFinal / 1MB, 1)) MB (redução de $reducaoPct%)" -tipo "Info"
         }
     }
+    catch {
+        Write-Host "Falha ao comprimir ou publicar o vídeo: $($_.Exception.Message)" -ForegroundColor Red
+    }
     finally {
-        Remove-Item $stdoutLog, $stderrLog, $progressFile -ErrorAction SilentlyContinue
+        if ($proc) {
+            if (-not $proc.HasExited) {
+                try { $proc.Kill(); $proc.WaitForExit() } catch { }
+            }
+            $proc.Dispose()
+        }
+        if ($reserva) {
+            $reserva.Dispose()
+            Remove-Item -LiteralPath $temporario -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $stdoutLog, $stderrLog, $progressFile -ErrorAction SilentlyContinue
     }
 }
 
