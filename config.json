@@ -17,6 +17,9 @@
         "codec": "aac",
         "bitrateKbps": 128
     },
+    "metadata": {
+        "mode": "clean"
+    },
     "bitrateCalc": {
         "safetyMargin": 0.92,
         "lowBitrateWarningKbps": 300
