@@ -1166,7 +1166,8 @@ function Resolve-DestinoCompressao {
     param(
         [IO.FileInfo]$item,
         [string]$container,
-        [switch]$AutorizarSobrescrita
+        [switch]$AutorizarSobrescrita,
+        [switch]$Planejar
     )
 
     $pasta = $item.DirectoryName
@@ -1181,7 +1182,7 @@ function Resolve-DestinoCompressao {
     $pastaSaida = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($pastaSaida, [ref]$provedor, [ref]$unidade)
     if ($provedor.Name -ne 'FileSystem') { throw 'A saída precisa estar no sistema de arquivos.' }
     Assert-ClipSqueezeOutputDirectory $pastaSaida
-    if (-not [IO.Directory]::Exists($pastaSaida)) {
+    if (-not $Planejar -and -not [IO.Directory]::Exists($pastaSaida)) {
         [void][IO.Directory]::CreateDirectory($pastaSaida)
         Assert-ClipSqueezeOutputDirectory $pastaSaida
     }
@@ -1192,6 +1193,9 @@ function Resolve-DestinoCompressao {
     }
     $arquivoExistente = Get-ClipSqueezeOutputFile $saida
     $sobrescrever = $AutorizarSobrescrita -or $config.overwrite
+    if ($Planejar) {
+        return [PSCustomObject]@{ Caminho = $saida; Pasta = $pastaSaida; Sobrescrever = $sobrescrever }
+    }
     if ($arquivoExistente -and -not $sobrescrever) {
         Write-Host "Já existe um arquivo comprimido: $saida" -ForegroundColor Yellow
         if ((Read-Host 'Sobrescrever? (s/n)') -ne 's') {
@@ -1204,47 +1208,8 @@ function Resolve-DestinoCompressao {
     [PSCustomObject]@{ Caminho = $saida; Pasta = $pastaSaida; Sobrescrever = $sobrescrever }
 }
 
-function Compress-Video {
-    [CmdletBinding(DefaultParameterSetName = 'Interativo')]
-    param(
-        [Parameter(Mandatory = $true, Position = 0, ParameterSetName = 'Interativo')]
-        [Parameter(Position = 0, ParameterSetName = 'Automatico')]
-        [string]$acelerador,
-        [Parameter(Mandatory = $true, Position = 1, ParameterSetName = 'Interativo')]
-        [Parameter(Position = 1, ParameterSetName = 'Automatico')]
-        [string]$arquivo,
-        [Parameter(Position = 2)]
-        [string]$perfil,
-        [Parameter(Position = 3)]
-        [string]$limite,
-        [string]$container,
-        [string]$codec,
-        [string]$resolution,
-        [ValidateSet('clean', 'preserve')][string]$Metadata,
-        [Parameter(Mandatory = $true, ParameterSetName = 'Automatico')]
-        [switch]$Force
-    )
-
-    # Validate required arguments in automatic mode without triggering Binder prompts.
-    if ([string]::IsNullOrWhiteSpace($acelerador) -or [string]::IsNullOrWhiteSpace($arquivo)) {
-        throw 'Informe o acelerador e o arquivo de vídeo.'
-    }
-    if (-not (Test-FFmpegInstalado -NaoInterativo:$Force)) {
-        if ($Force) { throw 'FFmpeg e FFprobe precisam estar disponíveis no PATH.' }
-        return
-    }
-
-    $p = Resolve-ParametrosComprimir -acelerador $acelerador -perfil $perfil -limiteStr $limite -container $container -codec $codec -resolution $resolution -metadata $Metadata
-    if ($null -eq $p) {
-        if ($Force) { throw 'Parâmetros de compressão inválidos.' }
-        return
-    }
-
-    $item = Resolve-ArquivoVideo $arquivo
-    if ($null -eq $item) {
-        if ($Force) { throw 'O arquivo de vídeo não foi encontrado ou é ambíguo.' }
-        return
-    }
+function Invoke-CompressaoVideo {
+    param([IO.FileInfo]$item, $p, [switch]$Force, [bool]$Notificar = $true)
 
     $sufixoSaida = $ClipSqueezeConfig.output.suffix
     if (-not $Force -and $sufixoSaida -and $item.BaseName -match [regex]::Escape($sufixoSaida) + '$') {
@@ -1260,9 +1225,7 @@ function Compress-Video {
         $destino = Resolve-DestinoCompressao -item $item -container $p.Container -AutorizarSobrescrita:$Force
     }
     catch {
-        if ($Force) { throw }
-        Write-Host "Não foi possível preparar a saída: $($_.Exception.Message)" -ForegroundColor Red
-        return
+        throw
     }
     if (-not $destino) { return }
 
@@ -1270,23 +1233,18 @@ function Compress-Video {
     $tags = if ($limparMetadados) { 'faixas' } else { 'nenhuma' }
     $metadados = Get-MetadadosVideo $item.FullName -tags $tags
     if (-not $metadados) {
-        if ($Force) { throw 'Não foi possível ler o vídeo com ffprobe.' }
-        Write-Host "Não foi possível ler o vídeo '$($item.FullName)' com ffprobe." -ForegroundColor Red
-        return
+        throw 'Não foi possível ler o vídeo com ffprobe.'
     }
     $duracao = $metadados.Duracao
 
     $bitrateAlvo = $null
     if ($p.LimiteBytes) {
         if (-not $duracao) {
-            if ($Force) { throw 'Duração inválida para calcular o bitrate.' }
-            Write-Host "Não foi possível determinar a duração do vídeo — necessário para calcular o limite de tamanho." -ForegroundColor Red
-            return
+            throw 'Duração inválida para calcular o bitrate.'
         }
         $bitrateAlvo = Get-BitrateAlvo -duracaoSegundos $duracao -limiteBytes $p.LimiteBytes
         if ($null -eq $bitrateAlvo) {
-            if ($Force) { throw 'Não foi possível calcular um bitrate válido.' }
-            return
+            throw 'Não foi possível calcular um bitrate válido.'
         }
     }
 
@@ -1348,11 +1306,10 @@ function Compress-Video {
                 }
             }
 
-            if ($ClipSqueezeConfig.notifications.enabled) {
+            if ($Notificar -and $ClipSqueezeConfig.notifications.enabled) {
                 Show-NotificacaoConclusao -titulo "ClipSqueeze — Erro" -mensagem $mensagemNotificacao -tipo "Error"
             }
-            if ($Force) { throw "FFmpeg falhou com código $($proc.ExitCode)." }
-            return
+            throw "FFmpeg falhou com código $($proc.ExitCode)."
         }
 
         $validacao = Test-ArquivoSaidaValido $temporario -container $p.Container -validarLimpeza:$limparMetadados
@@ -1393,13 +1350,13 @@ function Compress-Video {
         if ($p.Resolucao) { Write-Host "Resolução: $($p.Resolucao.ToUpper())" }
         if ($limparMetadados) { Write-Host 'Metadados: limpeza de tags verificada' }
 
-        if ($ClipSqueezeConfig.notifications.enabled) {
+        if ($Notificar -and $ClipSqueezeConfig.notifications.enabled) {
             Show-NotificacaoConclusao -titulo "ClipSqueeze — Concluído" -mensagem "${saidaNome}: $([math]::Round($tamanhoFinal / 1MB, 1)) MB (redução de $reducaoPct%)" -tipo "Info"
         }
+        return $saida
     }
     catch {
-        if ($Force) { throw }
-        Write-Host "Falha ao comprimir ou publicar o vídeo: $($_.Exception.Message)" -ForegroundColor Red
+        throw
     }
     finally {
         if ($proc) {
@@ -1421,6 +1378,121 @@ function Compress-Video {
         foreach ($arquivoTemporario in @($stdoutLog, $stderrLog, $progressFile)) {
             if ($arquivoTemporario) { Remove-Item -LiteralPath $arquivoTemporario -ErrorAction SilentlyContinue }
         }
+    }
+}
+
+function Resolve-FilaVideos {
+    param([string[]]$arquivos)
+
+    $entradas = [Collections.Generic.Dictionary[string,IO.FileInfo]]::new([StringComparer]::OrdinalIgnoreCase)
+    $extensoes = @('.mp4', '.mkv', '.mov', '.avi', '.webm', '.wmv', '.flv', '.m4v')
+    $sufixo = $ClipSqueezeConfig.output.suffix
+    foreach ($caminho in $arquivos) {
+        if ([string]::IsNullOrWhiteSpace($caminho)) { throw 'Informe um caminho de vídeo válido.' }
+        # Literal files take precedence, including filenames containing brackets.
+        if (Test-Path -LiteralPath $caminho -PathType Leaf) {
+            $candidatos = @(Get-Item -LiteralPath $caminho -ErrorAction Stop)
+        }
+        elseif ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($caminho) -and
+            ($caminho -match '[*?]' -or [IO.Path]::GetExtension($caminho))) {
+            $candidatos = @(Get-ChildItem -Path $caminho -File -ErrorAction Stop | Where-Object {
+                $_.Extension -in $extensoes -and (-not $sufixo -or -not $_.BaseName.EndsWith($sufixo, [StringComparison]::OrdinalIgnoreCase))
+            })
+        }
+        else {
+            $candidatos = @(Resolve-ArquivoVideo $caminho)
+        }
+        if (-not $candidatos.Count -or $null -eq $candidatos[0]) {
+            throw "O arquivo de vídeo não foi encontrado ou é ambíguo: $caminho"
+        }
+        foreach ($item in $candidatos) { $entradas[$item.FullName] = $item }
+    }
+    $entradas.Values | Sort-Object FullName
+}
+
+function Compress-Video {
+    [CmdletBinding(DefaultParameterSetName = 'Interativo')]
+    param(
+        [Parameter(Mandatory = $true, Position = 0, ParameterSetName = 'Interativo')]
+        [Parameter(Position = 0, ParameterSetName = 'Automatico')]
+        [string]$acelerador,
+        [Parameter(Mandatory = $true, Position = 1, ParameterSetName = 'Interativo')]
+        [Parameter(Position = 1, ParameterSetName = 'Automatico')]
+        [string[]]$arquivo,
+        [Parameter(Position = 2)][string]$perfil,
+        [Parameter(Position = 3)][string]$limite,
+        [string]$container,
+        [string]$codec,
+        [string]$resolution,
+        [ValidateSet('clean', 'preserve')][string]$Metadata,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Automatico')][switch]$Force,
+        [switch]$StopOnError,
+        [switch]$PassThru
+    )
+
+    if ([string]::IsNullOrWhiteSpace($acelerador) -or -not $arquivo) {
+        throw 'Informe o acelerador e o arquivo de vídeo.'
+    }
+    try {
+        if (-not (Test-FFmpegInstalado -NaoInterativo:$Force)) { throw 'FFmpeg e FFprobe precisam estar disponíveis no PATH.' }
+        $p = Resolve-ParametrosComprimir -acelerador $acelerador -perfil $perfil -limiteStr $limite -container $container -codec $codec -resolution $resolution -metadata $Metadata
+        if (-not $p) { throw 'Parâmetros de compressão inválidos.' }
+        $fila = @(Resolve-FilaVideos $arquivo)
+        $entradas = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $destinos = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($item in $fila) { $null = $entradas.Add($item.FullName) }
+        foreach ($item in $fila) {
+            $destino = Resolve-DestinoCompressao -item $item -container $p.Container -Planejar
+            if ($entradas.Contains($destino.Caminho) -or -not $destinos.Add($destino.Caminho)) {
+                throw "Conflito entre entradas ou destinos do lote: $($destino.Caminho)"
+            }
+        }
+    }
+    catch {
+        if ($Force) { throw }
+        Write-Error -Message $_.Exception.Message
+        return
+    }
+
+    $falhas = 0
+    $ultimoErro = $null
+    $concluidos = 0
+    $ignorados = 0
+    $indice = 0
+    foreach ($item in $fila) {
+        $indice++
+        if ($fila.Count -gt 1) { Write-Host "Vídeo $indice de $($fila.Count): $($item.Name)" }
+        $cronometro = [Diagnostics.Stopwatch]::StartNew()
+        $resultado = [PSCustomObject]@{ Entrada = $item.FullName; Saida = $null; Status = 'Ignorado'; Tempo = $null; Erro = $null }
+        try {
+            $resultado.Saida = Invoke-CompressaoVideo -item $item -p $p -Force:$Force -Notificar:($fila.Count -eq 1)
+            if ($resultado.Saida) {
+                $resultado.Status = 'Concluido'
+                $concluidos++
+            }
+            else { $ignorados++ }
+        }
+        catch {
+            $resultado.Status = 'Falhou'
+            $resultado.Erro = $_.Exception.Message
+            $ultimoErro = $resultado.Erro
+            $falhas++
+            Write-Host "Falha em '$($item.Name)': $($resultado.Erro)" -ForegroundColor Red
+        }
+        finally {
+            $cronometro.Stop()
+            $resultado.Tempo = $cronometro.Elapsed
+        }
+        if ($PassThru) { $resultado }
+        if ($StopOnError -and $resultado.Status -eq 'Falhou') { break }
+    }
+    if ($fila.Count -gt 1) {
+        Write-Host "Lote finalizado. Concluídos $concluidos, ignorados $ignorados, falhas $falhas, pendentes $($fila.Count - $indice)."
+    }
+    if ($falhas -gt 0) {
+        $mensagem = "$falhas vídeo(s) falharam na compressão. $ultimoErro"
+        if ($Force -or $StopOnError) { throw $mensagem }
+        Write-Error -Message $mensagem
     }
 }
 

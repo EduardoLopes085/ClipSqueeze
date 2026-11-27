@@ -37,6 +37,7 @@ That's all you need to know to use it.
 - [Installation](#-installation)
 - [Updating and uninstalling](#updating-and-uninstalling)
 - [Usage](#-usage)
+- [Batch processing](#batch-processing)
 - [Configuration](#configuration)
 - [Compression profiles](#️-compression-profiles)
 - [Size limit](#-size-limit)
@@ -147,6 +148,8 @@ Compress-Video <accelerator> <file> [profile] [limit] [-codec <codec>] [-contain
 | `-resolution` | ❌ | `hd`, `fhd`, `qhd`, `4k` | Accelerator's default scaling |
 | `-Metadata` | ❌ | `clean` or `preserve` | `clean` |
 | `-Force` | ❌ | Allows overwriting and recompression without prompting | Off |
+| `-StopOnError` | ❌ | Stops the queue at the first failure | Off |
+| `-PassThru` | ❌ | Returns a result object for each file | Off |
 
 Each resolution preset sets the longer side in pixels for both landscape and portrait video. The defaults are 1280 for `hd`, 1920 for `fhd`, 2560 for `qhd`, and 3840 for `4k`. An explicit preset can upscale the image, and the output dimensions are adjusted to even numbers.
 
@@ -174,6 +177,21 @@ Notice you don't need to type the file extension — if `meeting_recording.mp4` 
 To use `-Force` in automation, supply the accelerator and input file, and ensure `ffmpeg` and `ffprobe` are on your `PATH`. The output still passes path and integrity checks before replacing an existing file.
 
 Failures in `-Force` mode raise exceptions. Handle them with `try/catch` in scripts. An unhandled exception under `powershell.exe -File` or `pwsh -File` exits the process with a failure code.
+
+## Batch processing
+
+Supply a wildcard or a list of paths to process videos in a sequential queue.
+
+```powershell
+Compress-Video cpu ".\recordings\*.mp4" balanced 40mb -Force
+Compress-Video nvidia @("meeting.mp4", "presentation.mkv") -resolution hd -PassThru
+```
+
+The list is resolved before encoding, sorted by path, and deduplicated. Wildcards select supported video extensions and exclude files ending in the configured output suffix. An existing literal path takes priority over wildcard interpretation. Searches stay within the specified directory.
+
+An unmatched pattern or conflicting output paths stops the operation before encoding begins. The size limit applies to each video. File failures allow the queue to continue, while `-StopOnError` stops at the first error. Declining a confirmation marks the item as skipped.
+
+`-PassThru` returns `Entrada` (input), `Saida` (output), `Status`, `Tempo` (elapsed time), and `Erro` (error) for each processed item. Status values are `Concluido`, `Ignorado`, and `Falhou`. A queue with failures reports an error at the end, or throws with `-Force` or `-StopOnError`. In automation, collect results as they arrive through the pipeline. The queue stays in memory during execution.
 
 ## Configuration
 
@@ -286,7 +304,7 @@ A few bugs that came up during development and are worth documenting, because th
 - [ ] Publish as a proper PowerShell module (`.psd1`) on the PowerShell Gallery
 - [x] `-Force` flag for non-interactive compression
 - [ ] Compress a specific segment of the video (trim by start/end time)
-- [ ] Batch support — process multiple files via wildcard in a sequential queue
+- [x] Batch processing with wildcards and a sequential queue
 
 ---
 
