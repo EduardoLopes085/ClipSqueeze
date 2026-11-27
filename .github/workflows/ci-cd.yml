@@ -75,6 +75,8 @@ jobs:
           Join-Path $env:ChocolateyInstall 'bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Run CPU compression tests
         run: ./.github/scripts/Test-Compression.ps1
+      - name: Test sequential batch compression
+        run: ./.github/scripts/Test-Batch.ps1
       - name: Test video metadata cleaning
         run: ./.github/scripts/Test-Metadata.ps1
 

@@ -37,6 +37,7 @@ Isso é tudo que você precisa saber pra usar.
 - [Instalação](#-instalação)
 - [Atualização e desinstalação](#atualização-e-desinstalação)
 - [Uso](#-uso)
+- [Processamento em lote](#processamento-em-lote)
 - [Configuração](#configuração)
 - [Perfis de compressão](#️-perfis-de-compressão)
 - [Limite de tamanho](#-limite-de-tamanho)
@@ -147,6 +148,8 @@ comprimir <acelerador> <arquivo> [perfil] [limite] [-codec <codec>] [-container 
 | `-resolution` | ❌ | `hd`, `fhd`, `qhd`, `4k` | Escala padrão do acelerador |
 | `-Metadata` | ❌ | `clean` ou `preserve` | `clean` |
 | `-Force` | ❌ | Autoriza sobrescrita e recompressão sem perguntas | Desativado |
+| `-StopOnError` | ❌ | Interrompe a fila na primeira falha | Desativado |
+| `-PassThru` | ❌ | Retorna um objeto com o resultado de cada arquivo | Desativado |
 
 Cada preset de resolução define o lado maior em pixels, em vídeos horizontais e verticais. Os padrões são 1280 para `hd`, 1920 para `fhd`, 2560 para `qhd` e 3840 para `4k`. Um preset explícito pode ampliar a imagem e as dimensões são ajustadas para valores pares.
 
@@ -174,6 +177,21 @@ Repare que você não precisa digitar a extensão do arquivo — se `gravacao_re
 Para usar `-Force` em automação, informe o acelerador e o arquivo e deixe `ffmpeg` e `ffprobe` disponíveis no `PATH`. A saída continua passando pelas verificações de caminho e integridade antes de substituir um arquivo existente.
 
 Falhas em `-Force` geram exceções. Use `try/catch` para tratá-las em scripts. Uma exceção sem tratamento em `powershell.exe -File` ou `pwsh -File` encerra o processo com código de falha.
+
+## Processamento em lote
+
+Informe um wildcard ou uma lista de caminhos para processar vídeos em fila sequencial.
+
+```powershell
+comprimir cpu ".\gravacoes\*.mp4" balanced 40mb -Force
+comprimir nvidia @("reuniao.mp4", "apresentacao.mkv") -resolution hd -PassThru
+```
+
+A lista é resolvida antes da compressão, ordenada por caminho e deduplicada. Wildcards consideram as extensões de vídeo suportadas e excluem arquivos com o sufixo de saída configurado. Um caminho literal existente tem prioridade sobre a interpretação de wildcard. A busca fica no diretório indicado.
+
+Se um padrão ficar sem correspondências ou dois arquivos gerarem destinos conflitantes, a operação é interrompida antes da compressão. O limite de tamanho é aplicado a cada vídeo. Durante a execução, uma falha permite continuar a fila, e `-StopOnError` interrompe no primeiro erro. Cancelar uma confirmação marca o item como ignorado.
+
+`-PassThru` retorna `Entrada`, `Saida`, `Status`, `Tempo` e `Erro` por item processado. Os status são `Concluido`, `Ignorado` e `Falhou`. Uma fila com falhas gera um erro ao final, ou uma exceção com `-Force` ou `-StopOnError`. Em automação, capture os resultados à medida que chegam pelo pipeline. A fila permanece em memória durante a execução.
 
 ## Configuração
 
@@ -285,7 +303,7 @@ Alguns bugs que apareceram durante o desenvolvimento e valem registrar, porque n
 - [ ] Publicar como módulo PowerShell (`.psd1`) na PowerShell Gallery
 - [x] Flag `-Force` para compressão não interativa
 - [ ] Compressão de um trecho específico do vídeo (corte por tempo inicial/final)
-- [ ] Suporte a lote — processar vários arquivos via wildcard em fila sequencial
+- [x] Suporte a lote com wildcards e fila sequencial
 
 ---
 

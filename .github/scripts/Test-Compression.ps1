@@ -132,7 +132,13 @@ try {
         }
         & $originalLookup $Path
     }
-    comprimir cpu $inputPath fast -resolution hd
+    try {
+        comprimir cpu $inputPath fast -resolution hd -ErrorAction Stop
+        throw 'A late destination collision was accepted.'
+    }
+    catch {
+        if ($_.Exception.Message -notlike '*Move*') { throw }
+    }
     if ([IO.File]::ReadAllText($lateTarget) -ne 'keep this file') {
         throw 'Compression overwrote a file created after the first destination check.'
     }
