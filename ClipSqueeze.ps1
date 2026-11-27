@@ -20,7 +20,8 @@
 
     Configuração: se existir um config.json na mesma pasta deste script,
     seus valores sobrescrevem os padrões abaixo (por chave — não precisa
-    conter todas). Sem config.json, o comportamento é idêntico ao anterior.
+    conter todas). Sem config.json, o script usa os valores padrão
+    internos descritos em Get-ClipSqueezeConfig.
 #>
 
 # ============================================================
@@ -82,176 +83,184 @@ function Merge-ConfigHashtable {
     return $resultado
 }
 
+function Test-NumeroValido {
+    # Confere se $valor é um número dentro de [min, max]. Usa parsing com cultura
+    # invariante, mesmo padrão já usado no resto do script (Get-DuracaoVideo etc.),
+    # pra não depender do separador decimal da configuração regional da máquina,
+    # nem do tipo exato que o ConvertFrom-Json escolheu pro número (int/long/double).
+    param($valor, [double]$min, [double]$max)
+    if ($null -eq $valor) { return $false }
+    $numero = 0.0
+    $culturaInvariante = [System.Globalization.CultureInfo]::InvariantCulture
+    $estiloNumerico = [System.Globalization.NumberStyles]::Float
+    if (-not [double]::TryParse([string]$valor, $estiloNumerico, $culturaInvariante, [ref]$numero)) { return $false }
+    return ($numero -ge $min -and $numero -le $max)
+}
+
+function Repair-Campo {
+    # Padrão comum de validação: se $valorAtual passar em $ehValido, mantém;
+    # senão, avisa em amarelo e volta pro $valorPadrao daquele campo específico.
+    param([string]$rotulo, $valorAtual, $valorPadrao, [scriptblock]$ehValido)
+    if (& $ehValido $valorAtual) { return $valorAtual }
+    Write-Host "Aviso: '$rotulo' inválido no config.json ($valorAtual). Usando o padrão: $valorPadrao" -ForegroundColor Yellow
+    return $valorPadrao
+}
+
 function Repair-ParametrosPerfil {
-    param(
-        [hashtable]$Config,
-        [hashtable]$Padrao
-    )
+    # Percorre recursivamente um ramo de profileOverrides (funciona tanto pro
+    # formato de 2 níveis do cpu quanto pro de 3 níveis do amd/nvidia) e remove
+    # individualmente qualquer parâmetro inválido — o resto do override continua
+    # valendo, e o parâmetro removido cai de volta pro valor hardcoded do perfil.
+    param([hashtable]$Params, [string]$caminhoRotulo)
 
-    if ($null -eq $Config.profileOverrides -or $Config.profileOverrides -isnot [hashtable]) {
-        $Config.profileOverrides = $Padrao.profileOverrides.Clone()
-        return $Config
-    }
-
-    $resultado = @{
-        cpu    = @{}
-        amd    = @{}
-        nvidia = @{}
-    }
-
-    foreach ($acelerador in @("cpu", "amd", "nvidia")) {
-        $origem = $Config.profileOverrides[$acelerador]
-        if ($origem -isnot [hashtable]) { continue }
-
-        if ($acelerador -eq "cpu") {
-            foreach ($perfil in @("fast", "balanced", "efficient", "quality")) {
-                $perfilConfig = $origem[$perfil]
-                if ($perfilConfig -isnot [hashtable]) { continue }
-
-                $filtrado = @{}
-                foreach ($chave in @("preset", "crf")) {
-                    if ($perfilConfig.ContainsKey($chave)) {
-                        $filtrado[$chave] = $perfilConfig[$chave]
-                    }
-                }
-                if ($filtrado.Count -gt 0) {
-                    $resultado.cpu[$perfil] = $filtrado
-                }
+    foreach ($chave in @($Params.Keys)) {
+        $valor = $Params[$chave]
+        if ($valor -is [hashtable]) {
+            Repair-ParametrosPerfil -Params $valor -caminhoRotulo "$caminhoRotulo.$chave"
+            continue
+        }
+        if ($chave -in @("crf", "qvbr", "cq")) {
+            if (-not (Test-NumeroValido $valor 0 63)) {
+                Write-Host "Aviso: '$caminhoRotulo.$chave' inválido no config.json ($valor). Ignorando esse override (usa o valor hardcoded do perfil)." -ForegroundColor Yellow
+                $Params.Remove($chave)
             }
         }
-        else {
-            foreach ($codec in @("hevc", "h264", "av1")) {
-                $codecConfig = $origem[$codec]
-                if ($codecConfig -isnot [hashtable]) { continue }
-
-                foreach ($perfil in @("fast", "balanced", "efficient", "quality")) {
-                    $perfilConfig = $codecConfig[$perfil]
-                    if ($perfilConfig -isnot [hashtable]) { continue }
-
-                    $permitidos = if ($acelerador -eq "amd") {
-                        @("quality", "qvbr")
-                    }
-                    else {
-                        @("preset", "cq")
-                    }
-
-                    $filtrado = @{}
-                    foreach ($chave in $permitidos) {
-                        if ($perfilConfig.ContainsKey($chave)) {
-                            $filtrado[$chave] = $perfilConfig[$chave]
-                        }
-                    }
-                    if ($filtrado.Count -gt 0) {
-                        $resultado[$acelerador][$codec][$perfil] = $filtrado
-                    }
-                }
+        elseif ($chave -eq "preset") {
+            if ([string]::IsNullOrWhiteSpace([string]$valor)) {
+                Write-Host "Aviso: '$caminhoRotulo.preset' inválido no config.json. Ignorando esse override." -ForegroundColor Yellow
+                $Params.Remove($chave)
+            }
+        }
+        elseif ($chave -eq "quality") {
+            if ([string]$valor -notin @("speed", "balanced", "quality", "high_quality")) {
+                Write-Host "Aviso: '$caminhoRotulo.quality' inválido no config.json ($valor). Ignorando esse override." -ForegroundColor Yellow
+                $Params.Remove($chave)
             }
         }
     }
-
-    $Config.profileOverrides = $resultado
-    return $Config
 }
 
 function Repair-ClipSqueezeConfig {
+    # Validação semântica: o merge já garante que a ESTRUTURA existe (todas as
+    # chaves), mas não que os VALORES fazem sentido. Cada campo é checado aqui;
+    # se for inválido, volta pro valor padrão DAQUELE campo específico (não do
+    # config inteiro) e avisa em amarelo — JSON estruturalmente válido não é o
+    # mesmo que configuração válida para o ClipSqueeze.
     param(
         [hashtable]$Config,
         [hashtable]$Padrao
     )
 
-    if ($null -eq $Config -or $Config -isnot [hashtable]) {
-        return $Padrao
+    # --- defaults.* ---
+    $Config.defaults.profile = Repair-Campo "defaults.profile" $Config.defaults.profile $Padrao.defaults.profile { param($v) $v -in @("fast", "balanced", "efficient", "quality") }
+    $Config.defaults.container = Repair-Campo "defaults.container" $Config.defaults.container $Padrao.defaults.container { param($v) $v -in @("mp4", "mkv", "mov") }
+    $Config.defaults.codec = Repair-Campo "defaults.codec" $Config.defaults.codec $Padrao.defaults.codec { param($v) $v -in @("hevc", "h264", "av1") }
+    if ($Config.defaults.accelerator) {
+        $Config.defaults.accelerator = Repair-Campo "defaults.accelerator" $Config.defaults.accelerator $Padrao.defaults.accelerator { param($v) $v -in @("cpu", "amd", "nvidia") }
     }
 
-    foreach ($secao in @(
-            "defaults", "output", "audio", "bitrateCalc", "resolutionPresets",
-            "profileOverrides", "ffmpeg", "notifications", "ui", "logging"
-        )) {
-        if ($Config.ContainsKey($secao) -and $Config[$secao] -isnot [hashtable]) {
-            $Config[$secao] = $Padrao[$secao].Clone()
-        }
-    }
-
-    if ($Config.defaults.accelerator -notin @("cpu", "amd", "nvidia")) {
-        $Config.defaults.accelerator = $Padrao.defaults.accelerator
-    }
-    if ($Config.defaults.profile -notin @("fast", "balanced", "efficient", "quality")) {
-        $Config.defaults.profile = $Padrao.defaults.profile
-    }
-    if ($Config.defaults.container -notin @("mp4", "mkv", "mov")) {
-        $Config.defaults.container = $Padrao.defaults.container
-    }
-    if ($Config.defaults.codec -notin @("hevc", "h264", "av1")) {
-        $Config.defaults.codec = $Padrao.defaults.codec
-    }
-
-    if ($null -ne $Config.defaults.resolution) {
-        $resolucao = [string]$Config.defaults.resolution
-        if ([string]::IsNullOrWhiteSpace($resolucao) -or
-            -not $Config.resolutionPresets.ContainsKey($resolucao.ToLower())) {
-            $Config.defaults.resolution = $Padrao.defaults.resolution
-        }
-        else {
-            $Config.defaults.resolution = $resolucao.ToLower()
-        }
-    }
-
-    if ($Config.output.suffix -isnot [string] -or [string]::IsNullOrWhiteSpace($Config.output.suffix)) {
-        $Config.output.suffix = $Padrao.output.suffix
-    }
-    elseif ($Config.output.suffix.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
-        $Config.output.suffix = $Padrao.output.suffix
-    }
-
+    # --- output.* ---
     if ($Config.output.overwrite -isnot [bool]) {
+        Write-Host "Aviso: 'output.overwrite' deveria ser true/false no config.json. Usando o padrão: $($Padrao.output.overwrite)" -ForegroundColor Yellow
         $Config.output.overwrite = $Padrao.output.overwrite
     }
+    if ($Config.output.suffix) {
+        $caracteresInvalidosNome = [System.IO.Path]::GetInvalidFileNameChars()
+        if (($Config.output.suffix.ToCharArray() | Where-Object { $caracteresInvalidosNome -contains $_ }).Count -gt 0) {
+            Write-Host "Aviso: 'output.suffix' contém caracteres inválidos para nome de arquivo ($($Config.output.suffix)). Usando o padrão: $($Padrao.output.suffix)" -ForegroundColor Yellow
+            $Config.output.suffix = $Padrao.output.suffix
+        }
+    }
+    if ($Config.output.directory -and $Config.output.directory -ne "source") {
+        $caracteresInvalidosCaminho = [System.IO.Path]::GetInvalidPathChars()
+        if (($Config.output.directory.ToCharArray() | Where-Object { $caracteresInvalidosCaminho -contains $_ }).Count -gt 0) {
+            Write-Host "Aviso: 'output.directory' contém caracteres inválidos para caminho ($($Config.output.directory)). Usando a pasta do arquivo original." -ForegroundColor Yellow
+            $Config.output.directory = $Padrao.output.directory
+        }
+    }
 
-    if ($Config.audio.codec -isnot [string] -or [string]::IsNullOrWhiteSpace($Config.audio.codec)) {
+    # --- audio.* ---
+    if ([string]::IsNullOrWhiteSpace($Config.audio.codec) -or $Config.audio.codec -notmatch '^[a-zA-Z0-9_]+$') {
+        Write-Host "Aviso: 'audio.codec' inválido no config.json ($($Config.audio.codec)). Usando o padrão: $($Padrao.audio.codec)" -ForegroundColor Yellow
         $Config.audio.codec = $Padrao.audio.codec
     }
-    if ($Config.audio.bitrateKbps -isnot [int] -or $Config.audio.bitrateKbps -le 0) {
+    if (-not (Test-NumeroValido $Config.audio.bitrateKbps 8 1536)) {
+        Write-Host "Aviso: 'audio.bitrateKbps' inválido no config.json ($($Config.audio.bitrateKbps)). Precisa estar entre 8 e 1536. Usando o padrão: $($Padrao.audio.bitrateKbps)" -ForegroundColor Yellow
         $Config.audio.bitrateKbps = $Padrao.audio.bitrateKbps
     }
 
-    if ($Config.bitrateCalc.safetyMargin -isnot [double] -or
-        $Config.bitrateCalc.safetyMargin -le 0 -or
-        $Config.bitrateCalc.safetyMargin -gt 1) {
+    # --- bitrateCalc.* ---
+    if (-not (Test-NumeroValido $Config.bitrateCalc.safetyMargin 0.5 1.0)) {
+        Write-Host "Aviso: 'bitrateCalc.safetyMargin' inválido no config.json ($($Config.bitrateCalc.safetyMargin)). Precisa estar entre 0.5 e 1.0. Usando o padrão: $($Padrao.bitrateCalc.safetyMargin)" -ForegroundColor Yellow
         $Config.bitrateCalc.safetyMargin = $Padrao.bitrateCalc.safetyMargin
     }
-    if ($Config.bitrateCalc.lowBitrateWarningKbps -isnot [int] -or
-        $Config.bitrateCalc.lowBitrateWarningKbps -le 0) {
+    if (-not (Test-NumeroValido $Config.bitrateCalc.lowBitrateWarningKbps 1 100000)) {
+        Write-Host "Aviso: 'bitrateCalc.lowBitrateWarningKbps' inválido no config.json ($($Config.bitrateCalc.lowBitrateWarningKbps)). Usando o padrão: $($Padrao.bitrateCalc.lowBitrateWarningKbps)" -ForegroundColor Yellow
         $Config.bitrateCalc.lowBitrateWarningKbps = $Padrao.bitrateCalc.lowBitrateWarningKbps
     }
 
-    foreach ($chave in @("hd", "fhd", "qhd", "4k")) {
-        if (-not $Config.resolutionPresets.ContainsKey($chave) -or
-            $Config.resolutionPresets[$chave] -isnot [int] -or
-            $Config.resolutionPresets[$chave] -le 0) {
-            $Config.resolutionPresets[$chave] = $Padrao.resolutionPresets[$chave]
+    # --- resolutionPresets: cada chave é validada individualmente. Chave inválida
+    # que é um dos 4 presets originais (hd/fhd/qhd/4k) volta pro valor hardcoded
+    # dela; chave inválida inventada pelo usuário é removida (não existe "padrão"
+    # genérico pra ela). ---
+    $chavesParaRemover = @()
+    foreach ($chave in @($Config.resolutionPresets.Keys)) {
+        $valor = $Config.resolutionPresets[$chave]
+        if (-not (Test-NumeroValido $valor 240 7680)) {
+            if ($Padrao.resolutionPresets.ContainsKey($chave)) {
+                Write-Host "Aviso: 'resolutionPresets.$chave' inválido no config.json ($valor). Usando o padrão: $($Padrao.resolutionPresets[$chave])" -ForegroundColor Yellow
+                $Config.resolutionPresets[$chave] = $Padrao.resolutionPresets[$chave]
+            }
+            else {
+                Write-Host "Aviso: 'resolutionPresets.$chave' inválido no config.json ($valor) e não é um preset padrão — removendo essa chave." -ForegroundColor Yellow
+                $chavesParaRemover += $chave
+            }
         }
     }
+    foreach ($chave in $chavesParaRemover) { $Config.resolutionPresets.Remove($chave) }
 
-    if ($Config.ffmpeg.packageId -isnot [string] -or [string]::IsNullOrWhiteSpace($Config.ffmpeg.packageId)) {
-        $Config.ffmpeg.packageId = $Padrao.ffmpeg.packageId
+    if ($Config.defaults.resolution -and -not $Config.resolutionPresets.ContainsKey($Config.defaults.resolution)) {
+        Write-Host "Aviso: 'defaults.resolution' ($($Config.defaults.resolution)) não é uma chave válida de resolutionPresets. Ignorando (sem resolução padrão)." -ForegroundColor Yellow
+        $Config.defaults.resolution = $Padrao.defaults.resolution
     }
 
-    if ($Config.notifications.enabled -isnot [bool]) {
-        $Config.notifications.enabled = $Padrao.notifications.enabled
+    # --- profileOverrides: parâmetro por parâmetro (ver Repair-ParametrosPerfil) ---
+    foreach ($acelerador in @($Config.profileOverrides.Keys)) {
+        if ($Config.profileOverrides[$acelerador] -isnot [hashtable]) {
+            Write-Host "Aviso: 'profileOverrides.$acelerador' deveria ser um objeto no config.json. Ignorando." -ForegroundColor Yellow
+            $Config.profileOverrides[$acelerador] = @{}
+            continue
+        }
+        Repair-ParametrosPerfil -Params $Config.profileOverrides[$acelerador] -caminhoRotulo "profileOverrides.$acelerador"
     }
 
-    if ($Config.ui.progressBarWidth -isnot [int] -or $Config.ui.progressBarWidth -lt 10) {
+    # --- ui.* ---
+    if (-not (Test-NumeroValido $Config.ui.progressBarWidth 10 200)) {
+        Write-Host "Aviso: 'ui.progressBarWidth' inválido no config.json ($($Config.ui.progressBarWidth)). Precisa estar entre 10 e 200. Usando o padrão: $($Padrao.ui.progressBarWidth)" -ForegroundColor Yellow
         $Config.ui.progressBarWidth = $Padrao.ui.progressBarWidth
     }
     if ($Config.ui.colors -isnot [bool]) {
         $Config.ui.colors = $Padrao.ui.colors
     }
 
+    # --- notifications.* / logging.* ---
+    if ($Config.notifications.enabled -isnot [bool]) {
+        Write-Host "Aviso: 'notifications.enabled' deveria ser true/false no config.json. Usando o padrão: $($Padrao.notifications.enabled)" -ForegroundColor Yellow
+        $Config.notifications.enabled = $Padrao.notifications.enabled
+    }
     if ($Config.logging.keepErrorLogs -isnot [bool]) {
+        Write-Host "Aviso: 'logging.keepErrorLogs' deveria ser true/false no config.json. Usando o padrão: $($Padrao.logging.keepErrorLogs)" -ForegroundColor Yellow
         $Config.logging.keepErrorLogs = $Padrao.logging.keepErrorLogs
     }
+    if ($Config.logging.directory) {
+        $caracteresInvalidosLog = [System.IO.Path]::GetInvalidPathChars()
+        if (($Config.logging.directory.ToCharArray() | Where-Object { $caracteresInvalidosLog -contains $_ }).Count -gt 0) {
+            Write-Host "Aviso: 'logging.directory' contém caracteres inválidos para caminho ($($Config.logging.directory)). Usando a pasta do arquivo original." -ForegroundColor Yellow
+            $Config.logging.directory = $Padrao.logging.directory
+        }
+    }
 
-    return Repair-ParametrosPerfil -Config $Config -Padrao $Padrao
+    return $Config
 }
 
 function Get-ClipSqueezeConfig {
@@ -990,6 +999,14 @@ function Compress-Video {
     }
 
     $saida = Join-Path $pastaSaida "$($nome)$($sufixoSaida).$($p.Container)"
+
+    $caminhoSaidaCompleto = [System.IO.Path]::GetFullPath($saida)
+    if ($caminhoSaidaCompleto.Equals($item.FullName, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "O caminho de saída calculado é idêntico ao arquivo de entrada ('$($item.FullName)')." -ForegroundColor Red
+        Write-Host "Ajuste output.suffix e/ou output.directory no config.json para evitar sobrescrever o arquivo original." -ForegroundColor Red
+        return
+    }
+
     if ((Test-Path $saida) -and -not $ClipSqueezeConfig.output.overwrite) {
         Write-Host "Já existe um arquivo comprimido: $saida" -ForegroundColor Yellow
         $resposta = Read-Host "Sobrescrever? (s/n)"
@@ -1127,12 +1144,23 @@ function Compress-Video {
 
         $proc.WaitForExit()
         $duracaoTotal = ((Get-Date) - $inicio).ToString("hh\:mm\:ss")
-        Desenhar-PainelComprimir -percent 100 -decorrido $duracaoTotal -restante "concluído" -velocidade "--"
-
-        $arquivoGerado = (Test-Path $saida) -and ((Get-Item $saida).Length -gt 0)
         $saidaNome = Split-Path $saida -Leaf
 
-        if (-not ($proc.ExitCode -eq 0 -or $arquivoGerado)) {
+        # Único critério de sucesso do ffmpeg em si: o ExitCode. A existência do
+        # arquivo NÃO participa dessa decisão — um arquivo parcial pode existir
+        # mesmo quando o ffmpeg falhou, e não deve ser confundido com sucesso.
+        $ffmpegOk = ($proc.ExitCode -eq 0)
+
+        if (-not $ffmpegOk) {
+            # Mantém o progresso real (não finge 100%) e sinaliza a falha no painel.
+            Desenhar-PainelComprimir -percent $percent -decorrido $duracaoTotal -restante "falhou" -velocidade "--"
+
+            # O que sobrou em $saida, se sobrou algo, é parcial/inválido — nunca deve
+            # ser entregue como resultado de uma compressão que falhou.
+            if (Test-Path $saida) {
+                Remove-Item $saida -ErrorAction SilentlyContinue
+            }
+
             Write-Host "`nErro na compressão (código $($proc.ExitCode))." -ForegroundColor Red
 
             $conteudoErro = Get-Content $stderrLog -Raw -ErrorAction SilentlyContinue
@@ -1158,6 +1186,26 @@ function Compress-Video {
             }
             return
         }
+
+        # ffmpeg retornou ExitCode 0 — antes de anunciar sucesso, confirmamos com
+        # ffprobe que a saída é de fato um vídeo válido (arquivo truncado/corrompido
+        # já foi observado acontecer mesmo com ExitCode 0 em casos raros).
+        $validacaoSaida = Test-ArquivoSaidaValido -caminho $saida
+        if (-not $validacaoSaida.Valido) {
+            Desenhar-PainelComprimir -percent $percent -decorrido $duracaoTotal -restante "falhou" -velocidade "--"
+            Write-Host "`nO ffmpeg retornou sucesso, mas a validação pós-compressão falhou: $($validacaoSaida.Motivo)" -ForegroundColor Red
+
+            if (Test-Path $saida) {
+                Remove-Item $saida -ErrorAction SilentlyContinue
+            }
+
+            if ($ClipSqueezeConfig.notifications.enabled) {
+                Show-NotificacaoConclusao -titulo "ClipSqueeze — Erro" -mensagem "${saidaNome}: falha na validação pós-compressão." -tipo "Error"
+            }
+            return
+        }
+
+        Desenhar-PainelComprimir -percent 100 -decorrido $duracaoTotal -restante "concluído" -velocidade "--"
 
         $tamanhoFinal = (Get-Item $saida).Length
         $reducaoPct = [math]::Round((1 - ($tamanhoFinal / $tamanhoOriginal)) * 100, 1)
