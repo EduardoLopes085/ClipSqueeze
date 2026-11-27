@@ -10,6 +10,7 @@
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?logo=windows&logoColor=white" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="License: MIT">
   <img src="https://img.shields.io/badge/GPU-AMD%20AMF-ED1C24?logo=amd&logoColor=white" alt="AMD AMF">
+  <img src="https://img.shields.io/badge/GPU-NVIDIA%20NVENC-76B900?logo=nvidia&logoColor=white" alt="NVIDIA NVENC">
 </p>
 
 ---
@@ -21,7 +22,7 @@ Comprimir um vídeo rápido pra mandar no Discord ou no WhatsApp não devia exig
 **ClipSqueeze** gira em torno de uma única função PowerShell, `comprimir`, que vira uma camada de abstração em cima do FFmpeg: você diz **onde** processar (CPU ou GPU), **como** quer priorizar (velocidade, equilíbrio, eficiência ou qualidade) e, se quiser, **quanto** o arquivo final pode pesar. O script cuida do resto.
 
 ```powershell
-comprimir gpu "gravacao_reuniao" efficient 40mb
+comprimir nvidia "gravacao_reuniao" efficient 40mb
 ```
 
 Isso é tudo que você precisa saber pra usar.
@@ -34,7 +35,9 @@ Isso é tudo que você precisa saber pra usar.
 - [Como funciona](#-como-funciona)
 - [Requisitos](#️-requisitos)
 - [Instalação](#-instalação)
+- [Atualização e desinstalação](#atualização-e-desinstalação)
 - [Uso](#-uso)
+- [Configuração](#configuração)
 - [Perfis de compressão](#️-perfis-de-compressão)
 - [Limite de tamanho](#-limite-de-tamanho)
 - [Exemplo em ação](#-exemplo-em-ação)
@@ -51,11 +54,11 @@ Isso é tudo que você precisa saber pra usar.
 
 - 🔍 **Detecção automática de arquivo** — cole o nome do vídeo sem extensão, o script encontra o arquivo certo sozinho.
 - 📊 **Painel de progresso real** — barra que preenche, tempo decorrido, tempo restante estimado e velocidade de codificação, tudo ao vivo.
-- ⚡ **CPU ou GPU** — codifique via `libx265` (software) ou aceleração por hardware AMD (`hevc_amf`), sem precisar saber qual encoder usar.
+- ⚡ **CPU ou GPU** — codifique em HEVC via `libx265` ou use AMD AMF e NVIDIA NVENC com HEVC, H.264 ou AV1, conforme os encoders disponíveis.
 - 🎚️ **Perfis com intenção, não presets crus** — `fast`, `balanced`, `efficient` e `quality` significam a mesma coisa independente do acelerador escolhido.
-- 📦 **Restrição de tamanho opcional** — diga `40mb` e o script calcula o bitrate necessário a partir da duração real do vídeo, com margem de segurança. Uma única codificação, sem tentativa e erro.
+- 📦 **Limite de tamanho opcional** — informe `40mb` para calcular o bitrate-alvo a partir da duração do vídeo e aplicar uma margem de segurança em uma única codificação.
 - 🛠️ **Auto-diagnóstico do FFmpeg** — verifica se `ffmpeg`/`ffprobe` estão instalados e oferece instalar via `winget` na hora, se faltar algo.
-- 🧯 **Erros tratados** — log salvo automaticamente quando algo dá errado.
+- 🧯 **Diagnóstico de codificação** — erros do FFmpeg podem ser registrados em log para análise.
 
 ---
 
@@ -77,9 +80,7 @@ flowchart LR
     I --> J["Arquivo comprimido"]
 ```
 
-Quando você define um limite de tamanho (ex: `40mb`), o script calcula matematicamente o bitrate que deve produzir um arquivo dentro do orçamento, aplica uma margem de segurança fixa (pra compensar overhead de container) e codifica **uma única vez**.
-
-O limite de tamanho é tratado como uma **restrição**, não como uma meta a ser preenchida. Se o resultado ficar 10% abaixo do limite, ótimo — o script não vai tentar "aproveitar" o espaço que sobrou.
+Com um limite como `40mb`, o script aplica a margem de segurança configurada, reserva o bitrate de áudio e usa o restante como bitrate-alvo de vídeo em **uma única codificação**. O tamanho resultante depende do encoder e do contêiner.
 
 ---
 
@@ -87,42 +88,64 @@ O limite de tamanho é tratado como uma **restrição**, não como uma meta a se
 
 - Windows 10 (1809+) ou Windows 11
 - PowerShell 5.1 ou superior
-- [FFmpeg](https://www.gyan.dev/ffmpeg/builds/) (o script detecta se está faltando e oferece instalar via `winget` automaticamente)
-- Pra aceleração por GPU: uma placa AMD com suporte a AMF (a checagem de disponibilidade do encoder é feita automaticamente antes de qualquer compressão)
+- `ffmpeg` e `ffprobe` no `PATH`. O instalador pode instalar o pacote `Gyan.FFmpeg` pelo WinGet com sua confirmação. [Distribuição do FFmpeg](https://www.gyan.dev/ffmpeg/builds/)
+- Para GPU, uma placa e um driver com suporte a AMD AMF ou NVIDIA NVENC, além do encoder correspondente no FFmpeg. A codificação em AV1 depende de suporte específico no hardware.
 
 ---
 
 ## 📦 Instalação
 
-1. Baixe o `ClipSqueeze.ps1` deste repositório e salve numa pasta de sua preferência.
-2. Abra seu perfil do PowerShell:
-   ```powershell
-   notepad $PROFILE
-   ```
-3. No final do arquivo, adicione a linha abaixo — troque `C:\caminho\para\ClipSqueeze.ps1` pelo caminho real de onde você salvou o arquivo no passo 1:
-   ```powershell
-   . "C:\caminho\para\ClipSqueeze.ps1"
-   ```
-4. Salve, feche o editor e reabra o terminal (ou rode `. $PROFILE` pra recarregar sem fechar).
+Para instalar a partir do código-fonte, clone o repositório e execute o instalador no PowerShell em que pretende usar o ClipSqueeze.
 
-Se o FFmpeg ainda não estiver instalado, não se preocupe — na primeira execução o script detecta isso e pergunta se pode instalar via `winget` pra você.
+```powershell
+git clone https://github.com/EduardoLopes085/ClipSqueeze.git
+Set-Location ClipSqueeze
+.\install.ps1
+```
+
+Quando houver um pacote oficial, você também poderá extrair o ZIP e executar `.\install.ps1` dentro da pasta extraída. [GitHub Releases](https://github.com/EduardoLopes085/ClipSqueeze/releases)
+
+O instalador copia o script principal para `%LOCALAPPDATA%\ClipSqueeze`, cria a configuração inicial e adiciona o carregamento ao perfil do PowerShell atual. Abra uma nova sessão no mesmo host para usar `comprimir`. O instalador solicita confirmação se precisar alterar a política de execução do usuário ou instalar o FFmpeg.
+
+Para uso manual, mantenha `ClipSqueeze.ps1` em uma pasta de sua escolha e carregue-o na sessão com o comando abaixo. Para carregá-lo automaticamente, inclua a mesma linha no seu `$PROFILE`.
+
+```powershell
+. "C:\caminho\para\ClipSqueeze.ps1"
+```
+
+## Atualização e desinstalação
+
+Para atualizar uma instalação gerenciada, execute `.\update.ps1` na pasta extraída do ZIP oficial assinado. O atualizador confere a assinatura e o hash da nova versão antes de substituir o script principal. Para atualizar uma instalação manual, substitua a cópia de `ClipSqueeze.ps1` por uma versão de confiança. [Atualizações oficiais](https://github.com/EduardoLopes085/ClipSqueeze/blob/main/docs/ci-cd.md#atualizações-oficiais)
+
+Para remover uma instalação gerenciada, execute o comando abaixo na pasta do pacote ou do checkout.
+
+```powershell
+.\uninstall.ps1 -KeepFfmpeg
+```
+
+O desinstalador remove a instalação gerenciada e a integração no perfil. Use `-KeepFfmpeg` para manter o FFmpeg mesmo que ele tenha sido instalado pelo ClipSqueeze.
 
 ---
 
 ## 🚀 Uso
 
 ```powershell
-comprimir <acelerador> <arquivo> [perfil] [limite]
+comprimir <acelerador> <arquivo> [perfil] [limite] [-codec <codec>] [-container <container>] [-resolution <preset>]
 ```
 
 > O comando "oficial" é `Compress-Video` (segue a convenção Verbo-Substantivo do PowerShell, a mesma de `Compress-Archive`) — o alias `comprimir` funciona exatamente igual e é o nome pensado pro uso do dia a dia.
 
 | Parâmetro | Obrigatório | Valores aceitos | Padrão |
 |---|---|---|---|
-| `acelerador` | ✅ | `cpu`, `gpu` | — |
+| `acelerador` | ✅ | `cpu`, `amd`, `nvidia` | — |
 | `arquivo` | ✅ | Nome ou caminho do vídeo (com ou sem extensão) | — |
 | `perfil` | ❌ | `fast`, `balanced`, `efficient`, `quality` | `balanced` |
-| `limite` | ❌ | Tamanho máximo, ex: `40mb` | Sem limite |
+| `limite` | ❌ | Limite-alvo em MB decimais, como `40mb` | Qualidade-alvo do perfil |
+| `-codec` | ❌ | `hevc`, `h264`, `av1` em GPU | `hevc` |
+| `-container` | ❌ | `mp4`, `mkv`, `mov` | `mp4` |
+| `-resolution` | ❌ | `hd`, `fhd`, `qhd`, `4k` | Escala padrão do acelerador |
+
+Cada preset de resolução define o lado maior em pixels. Os padrões são 1280 para `hd`, 1920 para `fhd`, 2560 para `qhd` e 3840 para `4k`. A imagem mantém a proporção e pode ser ampliada para atingir o preset.
 
 ### Exemplos
 
@@ -130,11 +153,11 @@ comprimir <acelerador> <arquivo> [perfil] [limite]
 # Compressão simples, perfil balanceado, sem restrição de tamanho
 comprimir cpu "gravacao_reuniao"
 
-# GPU com perfil de melhor qualidade visual
-comprimir gpu "gravacao_reuniao" quality
+# AMD com H.264 e resolução HD
+comprimir amd "gravacao_reuniao" quality -codec h264 -resolution hd
 
-# GPU priorizando eficiência, respeitando 40MB (ex: limite de upload do Discord)
-comprimir gpu "gravacao_reuniao" efficient 40mb
+# NVIDIA com HEVC mirando um limite de 40 MB
+comprimir nvidia "gravacao_reuniao" efficient 40mb -container mkv
 
 # CPU rápido, pra um preview descartável
 comprimir cpu "gravacao_reuniao" fast
@@ -142,27 +165,32 @@ comprimir cpu "gravacao_reuniao" fast
 
 Repare que você não precisa digitar a extensão do arquivo — se `gravacao_reuniao.mp4` existir na pasta atual, o script encontra sozinho.
 
+## Configuração
+
+O `config.json` fica ao lado de `ClipSqueeze.ps1`. Em uma instalação gerenciada, edite `%LOCALAPPDATA%\ClipSqueeze\config.json` e abra uma nova sessão para carregar as alterações. Na instalação manual, você pode usar o [config.json de exemplo](config.json). Chaves omitidas usam os padrões internos.
+
+| Seção | O que configura |
+|---|---|
+| `defaults` | Perfil, codec da GPU, contêiner e preset de resolução. Informe o acelerador em cada comando. |
+| `output` | Sufixo, pasta de destino e permissão de sobrescrita. O padrão grava na pasta de origem com sufixo `_comprimido` e pede confirmação antes de sobrescrever. |
+| `resolutionPresets` e `profileOverrides` | Tamanho do lado maior e ajustes dos perfis por acelerador. |
+| `audio` e `bitrateCalc` | Codec e bitrate de áudio, margem de segurança e aviso de bitrate baixo. |
+| `notifications` e `logging` | Notificações no Windows e gravação dos logs do FFmpeg. |
+
 ---
 
 ## 🎛️ Perfis de compressão
 
 Cada perfil representa uma **intenção**, implementada de forma diferente dependendo do acelerador escolhido:
 
-| Perfil | Intenção | CPU (`libx265`) | GPU (`hevc_amf`) |
-|---|---|---|---|
-| `fast` | Rápido, sem grandes preocupações com tamanho | `preset veryfast`, `crf 27` | `quality speed`, `qvbr 32` |
-| `balanced` *(padrão)* | Equilíbrio entre tempo, qualidade e tamanho | `preset medium`, `crf 23` | `quality balanced`, `qvbr 26` |
-| `efficient` | Prioriza arquivo pequeno mantendo a qualidade-alvo | `preset veryslow`, `crf 23` | `quality quality`, `qvbr 26` |
-| `quality` | Prioriza fidelidade visual acima de tudo | `preset slow`, `crf 18` | `quality quality`, `qvbr 20` |
+| Perfil | Intenção | CPU (`libx265`) | AMD (`hevc_amf`) | NVIDIA (`hevc_nvenc`) |
+|---|---|---|---|---|
+| `fast` | Codificação rápida | `veryfast`, CRF 27 | `speed`, QVBR 32 | `p2`, CQ 32 |
+| `balanced` *(padrão)* | Equilíbrio entre tempo, qualidade e tamanho | `medium`, CRF 23 | `balanced`, QVBR 26 | `p4`, CQ 26 |
+| `efficient` | Mais tempo de processamento para melhorar a eficiência | `veryslow`, CRF 23 | `quality`, QVBR 23 | `p6`, CQ 26 |
+| `quality` | Prioriza fidelidade visual | `slow`, CRF 18 | `quality`, QVBR 18 | `p7`, CQ 20 |
 
-> **Note sobre `efficient` vs `quality`**: os dois nomes parecem sinônimos, mas representam objetivos diferentes.
->
-> - **`efficient`** mantém o **mesmo alvo de qualidade** do perfil `balanced` (mesmo CRF na CPU, mesmo `qvbr_quality_level` na GPU), mas usa uma configuração de codificação mais custosa (preset `veryslow` na CPU, `quality` no `-quality` da GPU) para extrair mais eficiência de compressão *nesse mesmo nível de qualidade* — o resultado tende a ser um arquivo menor com fidelidade visual parecida, ao custo de mais tempo de processamento.
-> - **`quality`** muda o **alvo em si** (CRF mais baixo, `qvbr_quality_level` mais baixo), priorizando fidelidade visual acima do tamanho do arquivo — o resultado tende a ser um arquivo maior.
->
-> Ou seja: `efficient` responde "quero a mesma qualidade gastando menos espaço", enquanto `quality` responde "quero mais qualidade, mesmo custando mais espaço".
-
-> Na GPU, o modo de controle de taxa usado é `qvbr` (Quality Variable Bitrate) — o equivalente mais próximo do CRF que o encoder de hardware da AMD oferece.
+Os valores da tabela são os padrões para HEVC sem limite de tamanho. Com um limite, o script usa o bitrate calculado para controlar a taxa. H.264 e AV1 têm ajustes próprios nos perfis de GPU.
 
 ---
 
@@ -175,58 +203,32 @@ flowchart TD
     A["Limite: 40 MB"] --> B["Converter para bits<br/>40MB × 8 = 320 Mbit"]
     B --> C["Obter duração real<br/>via ffprobe"]
     C --> D["Bitrate total = bits / duração"]
-    D --> E["Aplicar margem de segurança<br/>(8% de folga)"]
-    E --> F["Reservar 128 kbps<br/>para o áudio"]
+    D --> E["Aplicar margem de segurança<br/>(8% por padrão)"]
+    E --> F["Reservar o bitrate de áudio<br/>(128 kbps por padrão)"]
     F --> G["Bitrate de vídeo restante"]
     G --> H["Uma única codificação<br/>com esse bitrate-alvo"]
 ```
 
-A margem de segurança existe porque o cálculo teórico de bitrate não é uma garantia matemática exata — overhead de container, metadata e variação de encoder podem fazer o arquivo físico ficar levemente diferente do previsto. Em vez de compensar isso com múltiplas tentativas, o script já parte de um orçamento um pouco mais conservador.
+O comando interpreta `mb` em MB decimais, com 1 MB igual a 1.000.000 de bytes. O tamanho final pode ultrapassar o limite mesmo com a margem, pois depende da variação do encoder e do espaço ocupado pelo contêiner e pelos metadados.
 
 ---
 
 ## 🖥️ Exemplo em ação
 
-```
-=============================================
- Previsão de compressão
-=============================================
- Tempo decorrido : 00:00:54
- Tempo restante  : concluído
- Velocidade      : 1.8x
-
- Progresso: [########################################] 100%
-
- Acelerador: gpu | Perfil: efficient | Limite: 20mb
- Saída: 1920x-2
-=============================================================
-
-Arquivo: gravacao_reuniao.mp4
-Acelerador: gpu
-Perfil: efficient
-Limite: 20mb
-
-Duração: 00:33
-Bitrate de vídeo (alvo): 4332 kbps
-Bitrate de áudio: 128 kbps
-
-Compressão concluída.
-
-Tamanho original: 277.4 MB
-Tamanho final: 18.7 MB
-Redução: 93.3%
+```powershell
+comprimir cpu ".\gravacao_reuniao.mp4" balanced -resolution hd
 ```
 
-*(Saída real de teste — sinta-se livre para substituir por um GIF/asciinema do terminal rodando ao vivo.)*
+Com a configuração padrão, o comando gera `gravacao_reuniao_comprimido.mp4` na mesma pasta do original. O resumo no terminal mostra os tamanhos original e final e a porcentagem de redução.
 
 ---
 
 ## 🧯 Tratamento de erros
 
 - **FFmpeg ausente** → o script detecta e oferece instalar via `winget` (pacote `Gyan.FFmpeg`) na hora, sem precisar sair do terminal.
-- **Encoder de GPU indisponível** → antes de qualquer tentativa de uso da GPU, o script confirma que `hevc_amf` existe na lista de encoders do seu FFmpeg — se sua placa não suportar, você recebe um aviso claro em vez de um erro genérico do FFmpeg.
-- **Falha real na codificação** → o `stderr` do FFmpeg é salvo automaticamente como `<nome>_erro_compressao.log`, na mesma pasta do vídeo.
-- **Arquivo de saída já existe** → o script pergunta antes de sobrescrever.
+- **Encoder de GPU indisponível** → o script verifica se o FFmpeg lista o encoder do acelerador e codec escolhidos. Falhas de driver ou hardware também podem aparecer durante a codificação.
+- **Falha na codificação** → com os logs ativados, o script tenta salvar o `stderr` do FFmpeg como `<nome>_erro_compressao.log`, na pasta do vídeo ou na pasta configurada.
+- **Arquivo de saída já existe** → por padrão, o script pede confirmação antes de sobrescrever. A saída temporária precisa passar pela validação do `ffprobe` antes de ser publicada no destino.
 - **Limite de tamanho inviável** → se o limite informado for pequeno demais para a duração do vídeo, o script recusa a compressão em vez de gerar um arquivo inutilizável.
 
 ---
@@ -244,20 +246,21 @@ Alguns bugs que apareceram durante o desenvolvimento e valem registrar, porque n
 
 ## ⚠️ Limitações conhecidas
 
-- A resolução de saída é atualmente fixa em `1920:-2` — vídeos com largura menor que 1920px serão *upscalados* em vez de mantidos no tamanho original (correção planejada, veja Roadmap).
-- Aceleração por GPU hoje cobre apenas **AMD (AMF)**. NVIDIA e Intel ainda não são suportados.
-- O codec de saída é sempre HEVC (H.265) — não há seletor de codec ainda.
+- O caminho por CPU usa HEVC (H.265) via `libx265`. A escolha de H.264 ou AV1 exige um encoder de GPU compatível.
+- Os aceleradores de GPU disponíveis são AMD AMF e NVIDIA NVENC. Intel Quick Sync ainda não é suportado.
+- Sem `-resolution` ou um preset na configuração, CPU e NVIDIA usam uma escala proporcional com alvo de até 1920×1080. AMD solicita 1920×1080 ao filtro D3D11.
 
 ---
 
 ## 🗺️ Roadmap
 
-- [x] Seletor de codec (H.264 / H.265 / AV1) independente do acelerador
+- [x] Seleção de H.264, HEVC e AV1 em GPU
 - [x] Suporte a NVIDIA (NVENC)
 - [x] Manipulação do container de saída (mp4 / mkv / mov)
 - [x] Notificação nativa do Windows ao concluir a compressão
 - [x] Tradução de erros conhecidos do FFmpeg (ex: driver de GPU desatualizado) em dicas legíveis
-- [ ] Resolução de saída selecionável pelo usuário (hoje: sempre até 1920x1080, sem upscale)
+- [x] Presets de resolução de saída via `-resolution`
+- [ ] Suporte a Intel Quick Sync
 - [ ] Reescrita/limpeza de metadados do vídeo final
 - [ ] Publicar como módulo PowerShell (`.psd1`) na PowerShell Gallery
 - [ ] Flag `-Force` para uso não-interativo, ideal pra automação
@@ -268,7 +271,9 @@ Alguns bugs que apareceram durante o desenvolvimento e valem registrar, porque n
 
 ## 🤝 Contribuindo
 
-Pull requests são bem-vindos. Para mudanças maiores, abra uma issue primeiro descrevendo o que você gostaria de alterar.
+Abra pull requests de contribuição para `development` e use o modelo do PR para descrever a mudança e como testá-la. Para mudanças maiores, abra uma issue primeiro descrevendo o que você gostaria de alterar.
+
+A CI valida os workflows, monta o pacote e testa a compressão em CPU e o ciclo de instalação no PowerShell 5.1 e 7. A publicação oficial parte da `main` e exige um pacote assinado. [Guia de CI/CD](https://github.com/EduardoLopes085/ClipSqueeze/blob/main/docs/ci-cd.md)
 
 ---
 
