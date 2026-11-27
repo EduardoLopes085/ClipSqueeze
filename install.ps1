@@ -446,6 +446,9 @@ function Get-DefaultConfigObject {
             suffix = '_comprimido'
             overwrite = $false
         }
+        metadata = [ordered]@{
+            mode = 'clean'
+        }
         ffmpeg = [ordered]@{
             packageId = 'Gyan.FFmpeg'
         }

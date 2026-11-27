@@ -5,6 +5,10 @@ Get-Command ffmpeg, ffprobe -CommandType Application -ErrorAction Stop | Out-Nul
 $fixture = New-Item -Path (Join-Path ([IO.Path]::GetTempPath()) "ClipSqueeze test $([guid]::NewGuid())") -ItemType Directory
 
 try {
+    $configDirectory = Join-Path $fixture.FullName '[config]'
+    [void][IO.Directory]::CreateDirectory($configDirectory)
+    $configFile = Join-Path $configDirectory 'config.json'
+    [IO.File]::WriteAllText($configFile, '{"metadata":{"mode":"preserve"},"output":{"suffix":"_custom"}}')
     $inputPath = Join-Path $fixture.FullName 'test [video].mp4'
     & ffmpeg -nostdin -hide_banner -loglevel error -f lavfi -i 'testsrc2=size=320x180:rate=24' -f lavfi -i 'sine=frequency=440:sample_rate=48000' -t 2 -c:v mpeg4 -c:a aac $inputPath
     if ($LASTEXITCODE -ne 0) { throw "Failed to generate test video (exit $LASTEXITCODE)." }
@@ -24,6 +28,10 @@ try {
         }
     } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $fixture.FullName 'config.json') -Encoding Ascii
     . $scriptPath
+    $loadedConfig = Get-ClipSqueezeConfig $configFile
+    if ($loadedConfig.metadata.mode -ne 'preserve' -or $loadedConfig.output.suffix -ne '_custom') {
+        throw 'Configuration in a path with brackets was ignored.'
+    }
     if ($ClipSqueezeConfig.audio.codec -ne 'aac' -or $PerfisConfig.cpu.fast.preset -ne 'veryfast' -or $PerfisConfig.cpu.fast.crf -ne 27) {
         throw 'Invalid codec, preset or CRF survived configuration validation.'
     }
@@ -130,6 +138,55 @@ try {
     }
     Set-Item -Path function:Get-ClipSqueezeOutputFile -Value $originalLookup
 
+    $estadoPrompt = [pscustomobject]@{ Chamadas = 0; Proibir = $false }
+    function Read-Host {
+        param([string]$Prompt)
+        $estadoPrompt.Chamadas++
+        if ($estadoPrompt.Proibir) { throw "Unexpected prompt: $Prompt" }
+        return 'n'
+    }
+    comprimir cpu $inputPath fast -resolution hd
+    if ($estadoPrompt.Chamadas -ne 1 -or [IO.File]::ReadAllText($lateTarget) -ne 'keep this file') {
+        throw 'Normal compression did not ask before replacing the existing output.'
+    }
+
+    $estadoPrompt.Proibir = $true
+    comprimir cpu $inputPath fast -resolution hd -Force
+    if (-not (Test-ArquivoSaidaValido $lateTarget).Valido) { throw 'Force did not replace the existing output.' }
+
+    $hashCompressed = (Get-FileHash -LiteralPath $lateTarget).Hash
+    comprimir cpu $lateTarget fast -resolution hd -Force
+    $recompressed = Join-Path $fixture.FullName 'test [video]_late_late.mp4'
+    if (-not (Test-ArquivoSaidaValido $recompressed).Valido -or (Get-FileHash -LiteralPath $lateTarget).Hash -ne $hashCompressed) {
+        throw 'Force did not recompress the video while preserving its input.'
+    }
+
+    try {
+        comprimir -Force
+        throw 'Force accepted missing required arguments.'
+    }
+    catch {
+        if ($_.Exception.Message -notlike 'Informe o acelerador*') { throw }
+    }
+    try {
+        comprimir cpu (Join-Path $fixture.FullName 'missing.mp4') -Force
+        throw 'Force accepted a missing file.'
+    }
+    catch {
+        if ($_.Exception.Message -notlike '*encontrado*') { throw }
+    }
+    & {
+        function Get-Command {
+            param([string]$Name, $CommandType, $ErrorAction)
+            if ($Name -notin @('ffmpeg', 'ffprobe')) {
+                throw "Non-interactive dependency check should not look for $Name."
+            }
+        }
+        if (Test-FFmpegInstalado -NaoInterativo) {
+            throw 'The non-interactive dependency check accepted missing tools.'
+        }
+    }
+
     $ClipSqueezeConfig.output.overwrite = $true
     comprimir cpu $inputPath fast -resolution hd
     if (-not (Test-ArquivoSaidaValido $lateTarget).Valido) { throw 'Explicit overwrite did not publish the new video.' }
@@ -142,7 +199,13 @@ try {
     try {
         $ClipSqueezeConfig.output.directory = $junction
         $ClipSqueezeConfig.output.suffix = '_redirected'
-        comprimir cpu $inputPath fast -resolution hd
+        try {
+            comprimir cpu $inputPath fast -resolution hd -Force
+            throw 'Force accepted a redirected destination.'
+        }
+        catch {
+            if ($_.Exception.Message -notlike '*redirecionada*') { throw }
+        }
         if (Test-Path -LiteralPath (Join-Path $fixture.FullName 'test [video]_redirected.mp4')) {
             throw 'Compression published output through a junction.'
         }
@@ -150,8 +213,11 @@ try {
     finally {
         [IO.Directory]::Delete($junction)
     }
+    if ($estadoPrompt.Chamadas -ne 1) { throw 'An automatic operation prompted for input.' }
 }
 finally {
+    if (Test-Path -LiteralPath $configFile) { [IO.File]::Delete($configFile) }
+    if (Test-Path -LiteralPath $configDirectory) { [IO.Directory]::Delete($configDirectory) }
     Get-ChildItem -LiteralPath $fixture.FullName -File | Remove-Item -Force
     Remove-Item -LiteralPath $fixture.FullName
 }

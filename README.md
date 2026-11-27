@@ -59,6 +59,7 @@ Isso é tudo que você precisa saber pra usar.
 - 📦 **Limite de tamanho opcional** — informe `40mb` para calcular o bitrate-alvo a partir da duração do vídeo e aplicar uma margem de segurança em uma única codificação.
 - 🛠️ **Auto-diagnóstico do FFmpeg** — verifica se `ffmpeg`/`ffprobe` estão instalados e oferece instalar via `winget` na hora, se faltar algo.
 - 🧯 **Diagnóstico de codificação** — erros do FFmpeg podem ser registrados em log para análise.
+- **Privacidade** — remove por padrão tags descritivas do vídeo gerado, como localização, autor, comentários e títulos de capítulos.
 
 ---
 
@@ -130,7 +131,7 @@ O desinstalador remove a instalação gerenciada e a integração no perfil. Use
 ## 🚀 Uso
 
 ```powershell
-comprimir <acelerador> <arquivo> [perfil] [limite] [-codec <codec>] [-container <container>] [-resolution <preset>]
+comprimir <acelerador> <arquivo> [perfil] [limite] [-codec <codec>] [-container <container>] [-resolution <preset>] [-Metadata clean|preserve] [-Force]
 ```
 
 > O comando "oficial" é `Compress-Video` (segue a convenção Verbo-Substantivo do PowerShell, a mesma de `Compress-Archive`) — o alias `comprimir` funciona exatamente igual e é o nome pensado pro uso do dia a dia.
@@ -144,6 +145,8 @@ comprimir <acelerador> <arquivo> [perfil] [limite] [-codec <codec>] [-container 
 | `-codec` | ❌ | `hevc`, `h264`, `av1` em GPU | `hevc` |
 | `-container` | ❌ | `mp4`, `mkv`, `mov` | `mp4` |
 | `-resolution` | ❌ | `hd`, `fhd`, `qhd`, `4k` | Escala padrão do acelerador |
+| `-Metadata` | ❌ | `clean` ou `preserve` | `clean` |
+| `-Force` | ❌ | Autoriza sobrescrita e recompressão sem perguntas | Desativado |
 
 Cada preset de resolução define o lado maior em pixels, em vídeos horizontais e verticais. Os padrões são 1280 para `hd`, 1920 para `fhd`, 2560 para `qhd` e 3840 para `4k`. Um preset explícito pode ampliar a imagem e as dimensões são ajustadas para valores pares.
 
@@ -161,9 +164,16 @@ comprimir nvidia "gravacao_reuniao" efficient 40mb -container mkv
 
 # CPU rápido, pra um preview descartável
 comprimir cpu "gravacao_reuniao" fast
+
+# Sobrescreve a saída existente sem pedir confirmação
+comprimir cpu "gravacao_reuniao" -Force
 ```
 
 Repare que você não precisa digitar a extensão do arquivo — se `gravacao_reuniao.mp4` existir na pasta atual, o script encontra sozinho.
+
+Para usar `-Force` em automação, informe o acelerador e o arquivo e deixe `ffmpeg` e `ffprobe` disponíveis no `PATH`. A saída continua passando pelas verificações de caminho e integridade antes de substituir um arquivo existente.
+
+Falhas em `-Force` geram exceções. Use `try/catch` para tratá-las em scripts. Uma exceção sem tratamento em `powershell.exe -File` ou `pwsh -File` encerra o processo com código de falha.
 
 ## Configuração
 
@@ -175,7 +185,16 @@ O `config.json` fica ao lado de `ClipSqueeze.ps1`. Em uma instalação gerenciad
 | `output` | Sufixo, pasta de destino e permissão de sobrescrita. O padrão grava na pasta de origem com sufixo `_comprimido` e pede confirmação antes de sobrescrever. |
 | `resolutionPresets` e `profileOverrides` | Tamanho do lado maior e ajustes dos perfis por acelerador. |
 | `audio` e `bitrateCalc` | Codec e bitrate de áudio, margem de segurança e aviso de bitrate baixo. |
+| `metadata.mode` | Política de tags da saída. Use `preserve` para manter a cópia padrão do FFmpeg. |
 | `notifications` e `logging` | Notificações no Windows e gravação dos logs do FFmpeg. |
+
+No modo `clean`, o ClipSqueeze remove tags descritivas na mesma passada de compressão e valida o arquivo temporário antes de publicá-lo. A limpeza mantém os marcadores de início dos capítulos e os códigos de idioma válidos aceitos pelo contêiner. Tags técnicas geradas pelo FFmpeg podem aparecer na saída. A verificação abrange as tags do contêiner, das faixas e dos capítulos expostas pelo `ffprobe`. Informações visíveis ou audíveis continuam no conteúdo.
+
+Para manter a cópia padrão de metadados em uma compressão específica, execute o comando abaixo.
+
+```powershell
+comprimir cpu "video.mp4" -Metadata preserve
+```
 
 ---
 
@@ -262,9 +281,9 @@ Alguns bugs que apareceram durante o desenvolvimento e valem registrar, porque n
 - [x] Tradução de erros conhecidos do FFmpeg (ex: driver de GPU desatualizado) em dicas legíveis
 - [x] Presets de resolução de saída via `-resolution`
 - [ ] Suporte a Intel Quick Sync
-- [ ] Reescrita/limpeza de metadados do vídeo final
+- [x] Limpeza de tags descritivas do vídeo final
 - [ ] Publicar como módulo PowerShell (`.psd1`) na PowerShell Gallery
-- [ ] Flag `-Force` para uso não-interativo, ideal pra automação
+- [x] Flag `-Force` para compressão não interativa
 - [ ] Compressão de um trecho específico do vídeo (corte por tempo inicial/final)
 - [ ] Suporte a lote — processar vários arquivos via wildcard em fila sequencial
 

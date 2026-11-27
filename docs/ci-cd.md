@@ -16,6 +16,7 @@ Para reproduzir as verificações no Windows com `ffmpeg` e `ffprobe` no PATH, e
 & ./.github/scripts/New-ReleasePackage.ps1 -OutputDirectory (Join-Path $env:TEMP "ClipSqueeze-package-$([guid]::NewGuid())")
 & ./.github/scripts/Test-InstallationLifecycle.ps1
 & ./.github/scripts/Test-Compression.ps1
+& ./.github/scripts/Test-Metadata.ps1
 ```
 
 ## Comentário de revisão no pull request

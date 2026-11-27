@@ -7,7 +7,7 @@
     exatamente igual.
 
     Uso:
-        comprimir <acelerador> <arquivo> [perfil] [limite] [-resolution <preset>]
+        comprimir <acelerador> <arquivo> [perfil] [limite] [-resolution <preset>] [-Metadata clean|preserve] [-Force]
 
     Exemplos:
         comprimir cpu "gravacao_reuniao"
@@ -182,7 +182,7 @@ function Repair-ClipSqueezeConfig {
 
     foreach ($secao in @(
         "defaults", "output", "audio", "bitrateCalc", "resolutionPresets",
-        "profileOverrides", "ffmpeg", "notifications", "ui", "logging"
+        "profileOverrides", "ffmpeg", "notifications", "ui", "logging", "metadata"
     )) {
         if ($Config.ContainsKey($secao) -and $Config[$secao] -isnot [hashtable]) {
             $Config[$secao] = $Padrao[$secao].Clone()
@@ -200,6 +200,9 @@ function Repair-ClipSqueezeConfig {
     }
     if ($Config.defaults.codec -notin @("hevc", "h264", "av1")) {
         $Config.defaults.codec = $Padrao.defaults.codec
+    }
+    if ($Config.metadata.mode -isnot [string] -or $Config.metadata.mode -notin @('clean', 'preserve')) {
+        $Config.metadata.mode = $Padrao.metadata.mode
     }
 
     if ($null -ne $Config.defaults.resolution) {
@@ -302,6 +305,9 @@ function Get-ClipSqueezeConfig {
             overwrite = $false
             directory = $null
         }
+        metadata           = @{
+            mode = 'clean'
+        }
         audio              = @{
             codec       = "aac"
             bitrateKbps = 128
@@ -337,12 +343,12 @@ function Get-ClipSqueezeConfig {
         }
     }
 
-    if (-not (Test-Path $caminho -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $caminho -PathType Leaf)) {
         return $configPadrao
     }
 
     try {
-        $jsonTexto = Get-Content -Path $caminho -Raw -ErrorAction Stop
+        $jsonTexto = Get-Content -LiteralPath $caminho -Raw -Encoding UTF8 -ErrorAction Stop
         $jsonObjeto = $jsonTexto | ConvertFrom-Json -ErrorAction Stop
         $configUsuario = ConvertTo-HashtableDeep -InputObject $jsonObjeto
         $configMesclado = Merge-ConfigHashtable -Base $configPadrao -Override $configUsuario
@@ -371,8 +377,10 @@ function Install-FFmpegViaWinget {
 }
 
 function Test-FFmpegInstalado {
-    $ffmpegOk = [bool](Get-Command ffmpeg -ErrorAction SilentlyContinue)
-    $ffprobeOk = [bool](Get-Command ffprobe -ErrorAction SilentlyContinue)
+    param([switch]$NaoInterativo)
+
+    $ffmpegOk = [bool](Get-Command ffmpeg -CommandType Application -ErrorAction SilentlyContinue)
+    $ffprobeOk = [bool](Get-Command ffprobe -CommandType Application -ErrorAction SilentlyContinue)
 
     if ($ffmpegOk -and $ffprobeOk) { return $true }
 
@@ -384,6 +392,11 @@ function Test-FFmpegInstalado {
     }
     else {
         Write-Host "ffprobe foi encontrado, mas ffmpeg não." -ForegroundColor Red
+    }
+
+    if ($NaoInterativo) {
+        Write-Host 'Para usar -Force, instale ffmpeg e ffprobe e confirme que ambos estão no PATH.' -ForegroundColor Yellow
+        return $false
     }
 
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
@@ -403,7 +416,7 @@ function Test-FFmpegInstalado {
     }
 
     Start-Sleep -Seconds 1
-    if ((Get-Command ffmpeg -ErrorAction SilentlyContinue) -and (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+    if ((Get-Command ffmpeg -CommandType Application -ErrorAction SilentlyContinue) -and (Get-Command ffprobe -CommandType Application -ErrorAction SilentlyContinue)) {
         Write-Host "ffmpeg instalado e pronto para uso." -ForegroundColor Green
         return $true
     }
@@ -492,7 +505,8 @@ function Resolve-ParametrosComprimir {
         [string]$limiteStr,
         [string]$container,
         [string]$codec,
-        [string]$resolution
+        [string]$resolution,
+        [string]$metadata
     )
 
     # Cada default abaixo vem do config.json quando disponível; se
@@ -510,6 +524,7 @@ function Resolve-ParametrosComprimir {
     if ([string]::IsNullOrWhiteSpace($resolution) -and $ClipSqueezeConfig -and $ClipSqueezeConfig.defaults.resolution) {
         $resolution = $ClipSqueezeConfig.defaults.resolution
     }
+    if (-not $metadata) { $metadata = $ClipSqueezeConfig.metadata.mode }
 
     $aceleradoresValidos = @("cpu", "amd", "nvidia")
     $perfisValidos = @("fast", "balanced", "efficient", "quality")
@@ -587,25 +602,84 @@ function Resolve-ParametrosComprimir {
         Container   = $containerNormalizado
         Codec       = $codecNormalizado
         Resolucao   = $resolucaoNormalizada
+        Metadata    = $metadata
     }
 }
 
-function Get-MetadadosVideo {
-    param([string]$caminho)
+function Invoke-FfprobeJson {
+    param([string[]]$argumentos)
 
-    $PSNativeCommandUseErrorActionPreference = $false
+    $processo = $null
     try {
-        $json = ffprobe -v error -select_streams V:0 -show_entries 'format=duration:stream=codec_type,duration,avg_frame_rate,r_frame_rate' -of json $caminho 2>$null
-        if ($LASTEXITCODE -ne 0 -or -not $json) { return $null }
-        $dados = ConvertFrom-Json -InputObject ($json -join "`n") -ErrorAction Stop
+        $ffprobe = Get-Command ffprobe -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        $inicio = [Diagnostics.ProcessStartInfo]::new()
+        $inicio.FileName = $ffprobe.Path
+        $inicio.Arguments = ConvertTo-WindowsArgumentLine $argumentos
+        $inicio.UseShellExecute = $false
+        $inicio.CreateNoWindow = $true
+        $inicio.RedirectStandardOutput = $true
+        $inicio.RedirectStandardError = $true
+        # FFprobe returns UTF-8 even when Windows PowerShell uses a legacy code page.
+        $inicio.StandardOutputEncoding = [Text.Encoding]::UTF8
+        $processo = [Diagnostics.Process]::Start($inicio)
+        $erros = $processo.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
+        $saida = [Text.StringBuilder]::new()
+        $buffer = [char[]]::new(4096)
+        while (($lidos = $processo.StandardOutput.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            if ($saida.Length + $lidos -gt 1MB) { return $null }
+            $null = $saida.Append($buffer, 0, $lidos)
+        }
+        $processo.WaitForExit()
+        $null = $erros.GetAwaiter().GetResult()
+        if ($processo.ExitCode -ne 0) { return $null }
+        ConvertFrom-Json -InputObject ($saida.ToString()) -ErrorAction Stop
     }
     catch {
         return $null
     }
+    finally {
+        if ($processo) {
+            try {
+                if (-not $processo.HasExited) { $processo.Kill(); $processo.WaitForExit() }
+            }
+            catch {
+                Write-Verbose "Não foi possível encerrar o ffprobe: $($_.Exception.Message)"
+            }
+            $processo.Dispose()
+        }
+    }
+}
+
+function Get-MetadadosVideo {
+    param(
+        [string]$caminho,
+        [ValidateSet('nenhuma', 'faixas', 'todas')][string]$tags = 'nenhuma'
+    )
+
+    $argumentos = @('-v', 'error')
+    $campos = 'format=duration:stream=codec_type,duration,avg_frame_rate,r_frame_rate'
+    if ($tags -eq 'nenhuma') {
+        $argumentos += @('-select_streams', 'V:0')
+    }
+    else {
+        $campos += ':stream_disposition=attached_pic:stream_tags'
+        if ($tags -eq 'todas') { $campos += ':format_tags:chapter_tags:program_tags' }
+    }
+    $dados = Invoke-FfprobeJson ($argumentos + @('-show_entries', $campos, '-of', 'json', $caminho))
+    if (-not $dados) { return $null }
 
     $streams = $dados.PSObject.Properties['streams']
     if (-not $streams -or -not $streams.Value) { return $null }
-    $video = $streams.Value[0]
+    $video = $null
+    foreach ($fluxo in $streams.Value) {
+        $tipo = $fluxo.PSObject.Properties['codec_type']
+        if (-not $tipo -or $tipo.Value -ne 'video') { continue }
+        $disposicao = $fluxo.PSObject.Properties['disposition']
+        if ($disposicao -and $disposicao.Value.attached_pic -eq 1) { continue }
+        $video = $fluxo
+        break
+    }
+    if (-not $video) { return $null }
     $formato = $dados.PSObject.Properties['format']
     $duracao = 0.0
     $fps = 0.0
@@ -627,7 +701,105 @@ function Get-MetadadosVideo {
         }
     }
 
-    [PSCustomObject]@{ Duracao = $duracao; Fps = $fps }
+    [PSCustomObject]@{ Duracao = $duracao; Fps = $fps; Sondagem = $dados }
+}
+
+function Get-PropriedadesTags {
+    param($elemento)
+
+    if ($null -ne $elemento) {
+        $tags = $elemento.PSObject.Properties['tags']
+        if ($tags -and $tags.Value) { return $tags.Value.PSObject.Properties }
+    }
+}
+
+$padraoIdiomaFaixa = '\A[a-z]{2,3}(?:-[a-z0-9]{2,8})*\z'
+
+function Get-ArgumentosLimpezaMetadados {
+    param($sondagem, [string]$container)
+
+    # Explicit global scope is required. Unscoped -map_metadata -1 also disables
+    # stream metadata copying in FFmpeg. Keep the selected tracks' language tags.
+    $argumentos = [Collections.Generic.List[string]]::new()
+    $argumentos.AddRange([string[]]@('-hide_banner', '-loglevel', 'error', '-map_metadata:g', '-1', '-map_metadata:c:0', '-1'))
+    if ($container -in @('mp4', 'mov')) {
+        $argumentos.AddRange([string[]]@('-write_tmcd', '0'))
+    }
+
+    $chaves = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($faixa in $sondagem.streams) {
+        foreach ($tag in (Get-PropriedadesTags $faixa)) {
+            if ($tag.Name -eq 'language' -and $tag.Value -match $padraoIdiomaFaixa) { continue }
+            if ($tag.Name -eq 'language') {
+                if ($tag.Value -match '[:\\\p{Cc}]') {
+                    throw 'Uma faixa contém um idioma inválido que não pode ser removido com segurança.'
+                }
+                $argumentos.Add("-metadata:s:m:language:$($tag.Value)")
+                $argumentos.Add('language=')
+                continue
+            }
+            if ($tag.Name -match '[=\p{Cc}]' -or [string]::IsNullOrWhiteSpace($tag.Name)) {
+                throw 'Uma faixa contém uma chave de metadados que não pode ser removida com segurança.'
+            }
+            if ($chaves.Add($tag.Name)) {
+                $argumentos.Add('-metadata:s')
+                $argumentos.Add("$($tag.Name)=")
+            }
+        }
+    }
+    $argumentos.ToArray()
+}
+
+function Test-TagsPermitidas {
+    param($elemento, [hashtable]$regras)
+
+    foreach ($tag in (Get-PropriedadesTags $elemento)) {
+        $padrao = $regras[$tag.Name]
+        if (-not $padrao -or $tag.Value -isnot [string] -or $tag.Value -notmatch $padrao) { return $false }
+    }
+    return $true
+}
+
+function Test-MetadadosLimpos {
+    param($sondagem, [string]$container)
+
+    # These tags can be generated by the muxer even when all descriptive tags are removed.
+    $formato = @{ encoder = '\ALavf[0-9]+\.[0-9]+\.[0-9]+\z' }
+    $faixa = @{
+        language = $padraoIdiomaFaixa
+        encoder = '\ALavc[0-9]+\.[0-9]+\.[0-9]+(?: [a-z0-9_]+)?\z'
+    }
+    $capitulo = @{}
+    if ($container -in @('mp4', 'mov')) {
+        $formato.major_brand = '\A[a-z0-9 ]{4}\z'
+        $formato.minor_version = '\A[0-9]{1,10}\z'
+        $formato.compatible_brands = '\A(?:[a-z0-9 ]{4}){1,32}\z'
+        $faixa.handler_name = '\A(?:VideoHandler|SoundHandler|SubtitleHandler|DataHandler)\z'
+        $faixa.vendor_id = '\A(?:FFMP|appl|\[0\]\[0\]\[0\]\[0\])\z'
+        $capitulo.title = '\A\z'
+    }
+    else {
+        $faixa.duration = '\A[0-9]+:[0-9]{2}:[0-9]{2}\.[0-9]{1,9}\z'
+    }
+
+    $dadosFormato = $sondagem.PSObject.Properties['format']
+    if ($dadosFormato -and -not (Test-TagsPermitidas $dadosFormato.Value $formato)) { return $false }
+    foreach ($dadosFaixa in $sondagem.streams) {
+        if (-not (Test-TagsPermitidas $dadosFaixa $faixa)) { return $false }
+    }
+    $capitulos = $sondagem.PSObject.Properties['chapters']
+    if ($capitulos) {
+        foreach ($dadosCapitulo in $capitulos.Value) {
+            if (-not (Test-TagsPermitidas $dadosCapitulo $capitulo)) { return $false }
+        }
+    }
+    $programas = $sondagem.PSObject.Properties['programs']
+    if ($programas) {
+        foreach ($programa in $programas.Value) {
+            if (-not (Test-TagsPermitidas $programa @{})) { return $false }
+        }
+    }
+    return $true
 }
 
 function Get-BitrateAlvo {
@@ -766,7 +938,8 @@ function Build-FfmpegArgs {
         [Parameter(Mandatory = $true)] [string]$entrada,
         [Parameter(Mandatory = $true)] [string]$saida,
         [string]$progressFile,
-        $bitrateAlvo = $null
+        $bitrateAlvo = $null,
+        [string[]]$argsMetadados = @()
     )
 
     $acelerador = $parametros.Acelerador
@@ -807,7 +980,7 @@ function Build-FfmpegArgs {
     if ($progressFile) { $argsSaida += @('-progress', $progressFile) }
 
     @('-nostdin', '-i', $entrada, '-vf', (Get-FiltroEscalaVideo $parametros.Resolucao), '-c:v', $encoder) +
-        $argsEncoder + $argsQualidade + $argsSaida + @($saida)
+        $argsEncoder + $argsQualidade + $argsSaida + $argsMetadados + @($saida)
 }
 
 function ConvertTo-WindowsArgumentLine {
@@ -965,24 +1138,36 @@ function Show-NotificacaoConclusao {
 }
 
 function Test-ArquivoSaidaValido {
-    param([string]$caminho)
+    param(
+        [string]$caminho,
+        [string]$container,
+        [switch]$validarLimpeza
+    )
 
     $arquivo = Get-Item -LiteralPath $caminho -ErrorAction SilentlyContinue
     if (-not $arquivo -or $arquivo.Length -le 0) {
         return [PSCustomObject]@{ Valido = $false; Motivo = 'arquivo não existe ou está vazio' }
     }
-    $metadados = Get-MetadadosVideo $caminho
+    $tags = if ($validarLimpeza) { 'todas' } else { 'nenhuma' }
+    $metadados = Get-MetadadosVideo $caminho -tags $tags
     if (-not $metadados) {
         return [PSCustomObject]@{ Valido = $false; Motivo = 'ffprobe não encontrou um vídeo válido no arquivo' }
     }
     if ($metadados.Duracao -le 0) {
         return [PSCustomObject]@{ Valido = $false; Motivo = 'duração inválida ou ausente no arquivo de saída' }
     }
+    if ($validarLimpeza -and -not (Test-MetadadosLimpos $metadados.Sondagem $container)) {
+        return [PSCustomObject]@{ Valido = $false; Motivo = 'a saída contém tags fora da política de limpeza' }
+    }
     return [PSCustomObject]@{ Valido = $true; Motivo = $null }
 }
 
 function Resolve-DestinoCompressao {
-    param([IO.FileInfo]$item, [string]$container)
+    param(
+        [IO.FileInfo]$item,
+        [string]$container,
+        [switch]$AutorizarSobrescrita
+    )
 
     $pasta = $item.DirectoryName
     $config = $ClipSqueezeConfig.output
@@ -1006,7 +1191,7 @@ function Resolve-DestinoCompressao {
         throw 'A saída precisa ser diferente do vídeo original.'
     }
     $arquivoExistente = Get-ClipSqueezeOutputFile $saida
-    $sobrescrever = $config.overwrite
+    $sobrescrever = $AutorizarSobrescrita -or $config.overwrite
     if ($arquivoExistente -and -not $sobrescrever) {
         Write-Host "Já existe um arquivo comprimido: $saida" -ForegroundColor Yellow
         if ((Read-Host 'Sobrescrever? (s/n)') -ne 's') {
@@ -1020,10 +1205,13 @@ function Resolve-DestinoCompressao {
 }
 
 function Compress-Video {
+    [CmdletBinding(DefaultParameterSetName = 'Interativo')]
     param(
-        [Parameter(Mandatory = $true, Position = 0)]
+        [Parameter(Mandatory = $true, Position = 0, ParameterSetName = 'Interativo')]
+        [Parameter(Position = 0, ParameterSetName = 'Automatico')]
         [string]$acelerador,
-        [Parameter(Mandatory = $true, Position = 1)]
+        [Parameter(Mandatory = $true, Position = 1, ParameterSetName = 'Interativo')]
+        [Parameter(Position = 1, ParameterSetName = 'Automatico')]
         [string]$arquivo,
         [Parameter(Position = 2)]
         [string]$perfil,
@@ -1031,19 +1219,35 @@ function Compress-Video {
         [string]$limite,
         [string]$container,
         [string]$codec,
-        [string]$resolution
+        [string]$resolution,
+        [ValidateSet('clean', 'preserve')][string]$Metadata,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Automatico')]
+        [switch]$Force
     )
 
-    if (-not (Test-FFmpegInstalado)) { return }
+    # Validate required arguments in automatic mode without triggering Binder prompts.
+    if ([string]::IsNullOrWhiteSpace($acelerador) -or [string]::IsNullOrWhiteSpace($arquivo)) {
+        throw 'Informe o acelerador e o arquivo de vídeo.'
+    }
+    if (-not (Test-FFmpegInstalado -NaoInterativo:$Force)) {
+        if ($Force) { throw 'FFmpeg e FFprobe precisam estar disponíveis no PATH.' }
+        return
+    }
 
-    $p = Resolve-ParametrosComprimir -acelerador $acelerador -perfil $perfil -limiteStr $limite -container $container -codec $codec -resolution $resolution
-    if ($null -eq $p) { return }
+    $p = Resolve-ParametrosComprimir -acelerador $acelerador -perfil $perfil -limiteStr $limite -container $container -codec $codec -resolution $resolution -metadata $Metadata
+    if ($null -eq $p) {
+        if ($Force) { throw 'Parâmetros de compressão inválidos.' }
+        return
+    }
 
     $item = Resolve-ArquivoVideo $arquivo
-    if ($null -eq $item) { return }
+    if ($null -eq $item) {
+        if ($Force) { throw 'O arquivo de vídeo não foi encontrado ou é ambíguo.' }
+        return
+    }
 
     $sufixoSaida = $ClipSqueezeConfig.output.suffix
-    if ($sufixoSaida -and $item.BaseName -match [regex]::Escape($sufixoSaida) + '$') {
+    if (-not $Force -and $sufixoSaida -and $item.BaseName -match [regex]::Escape($sufixoSaida) + '$') {
         Write-Host "Esse arquivo já parece ser resultado de uma compressão anterior ($($item.Name))." -ForegroundColor Yellow
         $respostaRecomprimir = Read-Host "Deseja comprimir mesmo assim? (s/n)"
         if ($respostaRecomprimir -ne "s") {
@@ -1053,16 +1257,20 @@ function Compress-Video {
     }
 
     try {
-        $destino = Resolve-DestinoCompressao -item $item -container $p.Container
+        $destino = Resolve-DestinoCompressao -item $item -container $p.Container -AutorizarSobrescrita:$Force
     }
     catch {
+        if ($Force) { throw }
         Write-Host "Não foi possível preparar a saída: $($_.Exception.Message)" -ForegroundColor Red
         return
     }
     if (-not $destino) { return }
 
-    $metadados = Get-MetadadosVideo $item.FullName
+    $limparMetadados = $p.Metadata -eq 'clean'
+    $tags = if ($limparMetadados) { 'faixas' } else { 'nenhuma' }
+    $metadados = Get-MetadadosVideo $item.FullName -tags $tags
     if (-not $metadados) {
+        if ($Force) { throw 'Não foi possível ler o vídeo com ffprobe.' }
         Write-Host "Não foi possível ler o vídeo '$($item.FullName)' com ffprobe." -ForegroundColor Red
         return
     }
@@ -1071,11 +1279,15 @@ function Compress-Video {
     $bitrateAlvo = $null
     if ($p.LimiteBytes) {
         if (-not $duracao) {
+            if ($Force) { throw 'Duração inválida para calcular o bitrate.' }
             Write-Host "Não foi possível determinar a duração do vídeo — necessário para calcular o limite de tamanho." -ForegroundColor Red
             return
         }
         $bitrateAlvo = Get-BitrateAlvo -duracaoSegundos $duracao -limiteBytes $p.LimiteBytes
-        if ($null -eq $bitrateAlvo) { return }
+        if ($null -eq $bitrateAlvo) {
+            if ($Force) { throw 'Não foi possível calcular um bitrate válido.' }
+            return
+        }
     }
 
     $saida = $destino.Caminho
@@ -1088,14 +1300,19 @@ function Compress-Video {
     $reserva = $null
     $proc = $null
     try {
+        $argsMetadados = @()
+        if ($limparMetadados) {
+            $argsMetadados = @(Get-ArgumentosLimpezaMetadados -sondagem $metadados.Sondagem -container $p.Container)
+        }
         if ($exibirProgresso) { $progressFile = [IO.Path]::GetTempFileName() }
         $stdoutLog = [IO.Path]::GetTempFileName()
         $stderrLog = [IO.Path]::GetTempFileName()
         # Reserve a new file and deny deletion while FFmpeg writes to it.
         Assert-ClipSqueezeOutputDirectory $pastaSaida
         $reserva = [IO.File]::Open($temporario, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
-        $ffmpegArgs = Build-FfmpegArgs -parametros $p -entrada $item.FullName -saida $temporario -progressFile $progressFile -bitrateAlvo $bitrateAlvo
+        $ffmpegArgs = Build-FfmpegArgs -parametros $p -entrada $item.FullName -saida $temporario -progressFile $progressFile -bitrateAlvo $bitrateAlvo -argsMetadados $argsMetadados
         $linhaArgumentos = ConvertTo-WindowsArgumentLine $ffmpegArgs
+        if ($linhaArgumentos.Length -gt 30000) { throw 'Os argumentos do FFmpeg ultrapassam o limite compatível com o Windows.' }
         $proc = Start-Process -FilePath "ffmpeg" -ArgumentList $linhaArgumentos -NoNewWindow -PassThru `
             -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -ErrorAction Stop
         $proc.Handle | Out-Null
@@ -1134,10 +1351,11 @@ function Compress-Video {
             if ($ClipSqueezeConfig.notifications.enabled) {
                 Show-NotificacaoConclusao -titulo "ClipSqueeze — Erro" -mensagem $mensagemNotificacao -tipo "Error"
             }
+            if ($Force) { throw "FFmpeg falhou com código $($proc.ExitCode)." }
             return
         }
 
-        $validacao = Test-ArquivoSaidaValido $temporario
+        $validacao = Test-ArquivoSaidaValido $temporario -container $p.Container -validarLimpeza:$limparMetadados
         if (-not $validacao.Valido) { throw "O FFmpeg gerou um vídeo inválido: $($validacao.Motivo)" }
         $tamanhoFinal = (Get-Item -LiteralPath $temporario).Length
         $reserva.Dispose()
@@ -1173,12 +1391,14 @@ function Compress-Video {
         $codecEfetivo = if ($p.Acelerador -eq 'cpu') { 'hevc' } else { $p.Codec }
         Write-Host "Codec: $codecEfetivo"
         if ($p.Resolucao) { Write-Host "Resolução: $($p.Resolucao.ToUpper())" }
+        if ($limparMetadados) { Write-Host 'Metadados: limpeza de tags verificada' }
 
         if ($ClipSqueezeConfig.notifications.enabled) {
             Show-NotificacaoConclusao -titulo "ClipSqueeze — Concluído" -mensagem "${saidaNome}: $([math]::Round($tamanhoFinal / 1MB, 1)) MB (redução de $reducaoPct%)" -tipo "Info"
         }
     }
     catch {
+        if ($Force) { throw }
         Write-Host "Falha ao comprimir ou publicar o vídeo: $($_.Exception.Message)" -ForegroundColor Red
     }
     finally {
