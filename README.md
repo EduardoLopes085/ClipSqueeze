@@ -145,7 +145,7 @@ comprimir <acelerador> <arquivo> [perfil] [limite] [-codec <codec>] [-container 
 | `-container` | ❌ | `mp4`, `mkv`, `mov` | `mp4` |
 | `-resolution` | ❌ | `hd`, `fhd`, `qhd`, `4k` | Escala padrão do acelerador |
 
-Cada preset de resolução define o lado maior em pixels. Os padrões são 1280 para `hd`, 1920 para `fhd`, 2560 para `qhd` e 3840 para `4k`. A imagem mantém a proporção e pode ser ampliada para atingir o preset.
+Cada preset de resolução define o lado maior em pixels, em vídeos horizontais e verticais. Os padrões são 1280 para `hd`, 1920 para `fhd`, 2560 para `qhd` e 3840 para `4k`. Um preset explícito pode ampliar a imagem e as dimensões são ajustadas para valores pares.
 
 ### Exemplos
 
@@ -248,7 +248,8 @@ Alguns bugs que apareceram durante o desenvolvimento e valem registrar, porque n
 
 - O caminho por CPU usa HEVC (H.265) via `libx265`. A escolha de H.264 ou AV1 exige um encoder de GPU compatível.
 - Os aceleradores de GPU disponíveis são AMD AMF e NVIDIA NVENC. Intel Quick Sync ainda não é suportado.
-- Sem `-resolution` ou um preset na configuração, CPU e NVIDIA usam uma escala proporcional com alvo de até 1920×1080. AMD solicita 1920×1080 ao filtro D3D11.
+- Sem `-resolution` ou um preset na configuração, o vídeo mantém a proporção e é ajustado para caber em 1920×1080 sem ampliar o original.
+- Os aceleradores AMD e NVIDIA usam a CPU para decodificar e redimensionar o vídeo. A codificação usa AMF ou NVENC na GPU.
 
 ---
 
