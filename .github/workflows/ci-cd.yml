@@ -1,0 +1,155 @@
+name: ClipSqueeze CI/CD
+
+on:
+  pull_request:
+    branches: [main, development]
+  push:
+    branches: [main, development]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Signed draft release tag to publish from main. Leave blank for CI only.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clipsqueeze-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  workflows:
+    name: GitHub Actions lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Check workflow syntax
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+  windows:
+    name: Windows / ${{ matrix.name }}
+    runs-on: windows-2022
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: PowerShell 5.1
+            shell: powershell
+          - name: PowerShell 7
+            shell: pwsh
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Validate source and build test package
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { $env:RELEASE_TAG }
+          $package = Join-Path $env:RUNNER_TEMP 'clipsqueeze-package'
+          & ./.github/scripts/New-ReleasePackage.ps1 -Tag $tag -OutputDirectory $package
+          $version = (Get-Content -LiteralPath config.json -Raw | ConvertFrom-Json).applicationVersion
+          try {
+            & ./.github/scripts/Test-ReleasePackage.ps1 -Tag "v$version" -PackageDirectory $package -SignerSha256 ('A' * 64)
+            throw 'The release verifier accepted an unsigned package.'
+          }
+          catch {
+            if ($_.Exception.Message -notlike 'Missing valid Authenticode signature and timestamp*') { throw }
+          }
+      - name: Test installation lifecycle
+        run: ./.github/scripts/Test-InstallationLifecycle.ps1
+      - name: Install FFmpeg
+        run: |
+          choco install ffmpeg --version=8.1.2 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "Chocolatey failed with exit code $LASTEXITCODE." }
+          Join-Path $env:ChocolateyInstall 'bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Run CPU compression tests
+        run: ./.github/scripts/Test-Compression.ps1
+
+  ci:
+    name: CI
+    if: ${{ always() }}
+    needs: [workflows, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Check required jobs
+        shell: bash
+        env:
+          WORKFLOW_RESULT: ${{ needs.workflows.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+        run: |
+          printf 'Workflow lint: %s\nWindows matrix: %s\n' "$WORKFLOW_RESULT" "$WINDOWS_RESULT"
+          [[ "$WORKFLOW_RESULT" == success && "$WINDOWS_RESULT" == success ]]
+
+  release:
+    name: Publish signed release
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.release_tag != '' }}
+    needs: ci
+    runs-on: windows-2022
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify tag matches the tested main commit
+        run: |
+          if ($env:RELEASE_TAG -cnotmatch '\Av(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\z') { throw 'Invalid release tag.' }
+          $tagCommit = git rev-parse --verify "refs/tags/$($env:RELEASE_TAG)^{commit}"
+          if ($LASTEXITCODE -ne 0 -or $tagCommit -cne $env:GITHUB_SHA) { throw 'The tag must point to the tested main commit.' }
+      - name: Verify and publish the signed draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SIGNER_SHA256: ${{ vars.RELEASE_SIGNER_SHA256 }}
+        run: |
+          if ($env:RELEASE_SIGNER_SHA256 -notmatch '\A[0-9A-Fa-f]{64}\z') { throw 'Set the RELEASE_SIGNER_SHA256 variable in the release environment.' }
+          $draft = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft,isPrerelease,assets,tagName | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $draft.isDraft -or $draft.isPrerelease -or $draft.tagName -cne $env:RELEASE_TAG) {
+            throw 'An unpublished stable draft for the exact tag is required.'
+          }
+          $assetNames = @('ClipSqueeze.ps1', "ClipSqueeze-$env:RELEASE_TAG.zip", 'SHA256SUMS.txt')
+          if ($draft.assets.Count -ne $assetNames.Count -or (Compare-Object $assetNames $draft.assets.name -CaseSensitive)) {
+            throw 'The draft must contain exactly the three expected release assets.'
+          }
+          if ($draft.assets | Where-Object { $_.state -ne 'uploaded' -or $_.size -le 0 -or $_.size -gt 20MB -or $_.digest -notmatch '\Asha256:[a-f0-9]{64}\z' }) {
+            throw 'The draft has an incomplete, oversized or unverifiable asset.'
+          }
+          $packageDirectory = Join-Path $env:RUNNER_TEMP 'clipsqueeze-release'
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --dir $packageDirectory --pattern $assetNames[0] --pattern $assetNames[1] --pattern $assetNames[2]
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to download the draft assets.' }
+          foreach ($asset in $draft.assets) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path $packageDirectory $asset.name)).Hash
+            if ($asset.digest -ne "sha256:$hash") { throw "Draft digest mismatch for $($asset.name)." }
+          }
+          & ./.github/scripts/Test-ReleasePackage.ps1 -Tag $env:RELEASE_TAG -PackageDirectory $packageDirectory -SignerSha256 $env:RELEASE_SIGNER_SHA256
+          $verifiedDraft = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft,isPrerelease,assets,tagName | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $verifiedDraft.isDraft -or $verifiedDraft.isPrerelease -or $verifiedDraft.tagName -cne $env:RELEASE_TAG -or
+              (Compare-Object @($draft.assets | ForEach-Object { "$($_.name) $($_.id) $($_.digest)" }) @($verifiedDraft.assets | ForEach-Object { "$($_.name) $($_.id) $($_.digest)" }) -CaseSensitive)) {
+            throw 'The draft changed during verification.'
+          }
+          $remoteTag = @(git ls-remote --tags origin "refs/tags/$env:RELEASE_TAG" "refs/tags/$($env:RELEASE_TAG)^{}")
+          $remoteCommit = $remoteTag | Sort-Object { ($_ -split '\s+')[1] } | Select-Object -Last 1
+          if ($LASTEXITCODE -ne 0 -or -not $remoteCommit -or ($remoteCommit -split '\s+')[0] -cne $env:GITHUB_SHA) {
+            throw 'The remote tag changed during verification.'
+          }
+          gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false --verify-tag
+          if ($LASTEXITCODE -ne 0) { throw "GitHub release failed with exit code $LASTEXITCODE." }
